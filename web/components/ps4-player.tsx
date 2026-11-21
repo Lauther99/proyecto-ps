@@ -7,6 +7,7 @@
 // Sin "trickle ICE": cada lado espera a reunir sus candidatos y envía la descripción completa.
 
 import { useEffect, useRef, useState } from 'react'
+import { startControllerInput, type InputSource } from '@/lib/controller-input'
 
 type Status = 'conectando' | 'negociando' | 'reproduciendo' | 'desconectado' | 'error'
 
@@ -33,6 +34,7 @@ export default function Ps4Player({ signalingUrl }: Props) {
   const [detail, setDetail] = useState('')
   // Los navegadores solo permiten sonido después de un clic del usuario.
   const [muted, setMuted] = useState(true)
+  const [inputSource, setInputSource] = useState<InputSource>('ninguno')
 
   const toggleSound = () => {
     const video = videoRef.current
@@ -54,6 +56,14 @@ export default function Ps4Player({ signalingUrl }: Props) {
         video.srcObject = event.streams[0]
         setStatus('reproduciendo')
       }
+    }
+
+    // El agente abre el canal "input": por ahí mandamos el mando y el teclado.
+    let stopInput: (() => void) | null = null
+    pc.ondatachannel = (event) => {
+      if (event.channel.label !== 'input') return
+      stopInput?.()
+      stopInput = startControllerInput(event.channel, setInputSource)
     }
 
     pc.onconnectionstatechange = () => {
@@ -85,6 +95,7 @@ export default function Ps4Player({ signalingUrl }: Props) {
     ws.onclose = () => setStatus((current) => (current === 'reproduciendo' ? current : 'desconectado'))
 
     return () => {
+      stopInput?.()
       ws.close()
       pc.close()
     }
@@ -103,6 +114,9 @@ export default function Ps4Player({ signalingUrl }: Props) {
         <p className="text-sm text-zinc-500">
           Estado: <span className="font-medium text-zinc-200">{status}</span>
           {detail && <span className="ml-2">({detail})</span>}
+          <span className="ml-4">
+            Control: <span className="font-medium text-zinc-200">{inputSource}</span>
+          </span>
         </p>
         <button
           type="button"

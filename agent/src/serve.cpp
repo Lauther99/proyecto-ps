@@ -8,9 +8,19 @@
 // Señalización:
 //   agente -> navegador: {"type":"offer","sdp":"..."}
 //   navegador -> agente: {"type":"answer","sdp":"..."}
+//
+// Controles: canal de datos WebRTC "input" (sin orden ni reenvíos: si un paquete se pierde,
+// el siguiente ya trae el estado completo). El navegador manda el estado del mando ~30 veces
+// por segundo:
+//   {"s":seq,"b":botones,"l2":0-255,"r2":0-255,"lx":..,"ly":..,"rx":..,"ry":..}
+// Solo controla el primer navegador conectado (el "jugador"); los demás solo miran.
+//
+// La sesión con la PS4 se abre solo cuando hay navegadores, y se cierra 30 s después de que
+// se va el último. Así el agente no le quita el control al mando físico cuando nadie juega.
 #include "commands.hpp"
 #include "session_config.hpp"
 
+#include <chiaki/controller.h>
 #include <chiaki/discovery.h>
 #include <chiaki/log.h>
 #include <chiaki/session.h>
@@ -62,6 +72,8 @@ namespace agent
             std::shared_ptr<rtc::RtpPacketizationConfig> audio_rtp_config;
             std::shared_ptr<rtc::RtcpSrReporter> audio_sr_reporter;
             bool audio_started = false; // ¿ya se fijó la marca de tiempo inicial del audio?
+            std::shared_ptr<rtc::DataChannel> input; // controles que manda el navegador
+            int64_t last_input_seq = -1;             // para descartar paquetes que llegan tarde
         };
 
         // Estado compartido entre hilos (chiaki, libdatachannel y el principal).
@@ -81,9 +93,19 @@ namespace agent
             std::vector<uint8_t> sps;
             std::vector<uint8_t> pps;
             std::atomic<uint32_t> audio_frame_size{480}; // muestras por trama Opus (lo informa la PS4)
-            std::mutex idr_mutex;
+            // Protege 'session' (cambia en cada reconexión) y todo lo que se le envía a la PS4.
+            std::mutex session_mutex;
             std::chrono::steady_clock::time_point last_idr_request{};
+            // Controles (protegidos por session_mutex).
+            std::chrono::steady_clock::time_point last_input{};
+            bool input_active = false; // ¿el último estado enviado tenía algo presionado?
         };
+
+        // Si el jugador deja de mandar controles por este tiempo (pestaña oculta, red cortada),
+        // soltamos todo para que ningún botón quede presionado.
+        constexpr auto kInputTimeout = std::chrono::milliseconds(500);
+        // Tiempo que la sesión sigue abierta sin navegadores, por si alguien recarga la página.
+        constexpr auto kIdleSessionTimeout = std::chrono::seconds(30);
 
         std::atomic<bool> g_stop{false};
 
@@ -172,11 +194,11 @@ namespace agent
 
         // Pide a la PS4 un fotograma completo (IDR). Como mucho uno cada 500 ms, porque el
         // navegador repite el pedido (PLI) varias veces por segundo mientras espera.
-        // 'idr_mutex' también protege 'state.session', que cambia en cada reconexión.
+        // 'session_mutex' también protege 'state.session', que cambia en cada reconexión.
         void request_keyframe(ServerState& state)
         {
             const auto now = std::chrono::steady_clock::now();
-            std::lock_guard<std::mutex> lock(state.idr_mutex);
+            std::lock_guard<std::mutex> lock(state.session_mutex);
             if (!state.session || !state.ps4_connected)
                 return;
             if (now - state.last_idr_request < std::chrono::milliseconds(500))
@@ -186,12 +208,88 @@ namespace agent
             std::printf("[ps4] Pedido fotograma completo (IDR).\n");
         }
 
+        // Envía un estado de mando a la PS4. Llamar con session_mutex tomado.
+        void send_controller_state_locked(ServerState& state, ChiakiControllerState& controller)
+        {
+            if (state.session && state.ps4_connected)
+                chiaki_session_set_controller_state(state.session, &controller);
+        }
+
+        // Suelta todos los botones y centra las palancas.
+        void release_controls_locked(ServerState& state)
+        {
+            ChiakiControllerState idle;
+            chiaki_controller_state_set_idle(&idle);
+            send_controller_state_locked(state, idle);
+            state.input_active = false;
+        }
+
+        int16_t clamp_axis(const json& value)
+        {
+            return static_cast<int16_t>((std::clamp)(value.get<int>(), -32767, 32767));
+        }
+
+        uint8_t clamp_trigger(const json& value)
+        {
+            return static_cast<uint8_t>((std::clamp)(value.get<int>(), 0, 255));
+        }
+
+        // Un mensaje del canal "input". Solo se aplica si viene del jugador.
+        void on_input_message(ServerState& state, Viewer& viewer, const std::string& text)
+        {
+            // ¿Es el jugador? El primer navegador de la lista con el canal de controles abierto.
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                Viewer* player = nullptr;
+                for (const auto& v : state.viewers)
+                    if (v->input && v->input->isOpen()) { player = v.get(); break; }
+                if (player != &viewer)
+                    return;
+            }
+
+            ChiakiControllerState controller;
+            chiaki_controller_state_set_idle(&controller);
+            try
+            {
+                const json msg = json::parse(text);
+                const int64_t seq = msg.value("s", int64_t{0});
+                if (seq <= viewer.last_input_seq)
+                    return; // llegó tarde: ya aplicamos uno más nuevo
+                viewer.last_input_seq = seq;
+
+                // Filtro del botón PS: nadie puede salir del juego ni cambiar de perfil.
+                const uint32_t buttons = msg.value("b", 0u) & 0xffffu & ~uint32_t(CHIAKI_CONTROLLER_BUTTON_PS);
+                controller.buttons = buttons;
+                controller.l2_state = clamp_trigger(msg.value("l2", json(0)));
+                controller.r2_state = clamp_trigger(msg.value("r2", json(0)));
+                controller.left_x = clamp_axis(msg.value("lx", json(0)));
+                controller.left_y = clamp_axis(msg.value("ly", json(0)));
+                controller.right_x = clamp_axis(msg.value("rx", json(0)));
+                controller.right_y = clamp_axis(msg.value("ry", json(0)));
+            }
+            catch (const std::exception& e)
+            {
+                std::printf("[web] Control invalido: %s\n", e.what());
+                return;
+            }
+
+            std::lock_guard<std::mutex> lock(state.session_mutex);
+            state.last_input = std::chrono::steady_clock::now();
+            state.input_active = true;
+            send_controller_state_locked(state, controller);
+        }
+
         // Crea la conexión WebRTC para un navegador recién conectado y le envía la oferta.
         void add_viewer(ServerState& state, std::shared_ptr<rtc::WebSocket> ws)
         {
             auto viewer = std::make_shared<Viewer>();
             viewer->ws = ws;
-            viewer->pc = std::make_shared<rtc::PeerConnection>(rtc::Configuration{});
+            // Sin negociación automática: al crear el canal de controles, libdatachannel generaría
+            // la oferta por su cuenta antes de que registremos los callbacks, y en red local la
+            // reunión de candidatos termina tan rápido que nunca enviaríamos la oferta.
+            rtc::Configuration pc_config;
+            pc_config.disableAutoNegotiation = true;
+            viewer->pc = std::make_shared<rtc::PeerConnection>(pc_config);
 
             // Track de video de solo envío con H.264.
             rtc::Description::Video media(kCname, rtc::Description::Direction::SendOnly);
@@ -227,6 +325,18 @@ namespace agent
             viewer->audio_track->setMediaHandler(audio_handler);
 
             std::weak_ptr<Viewer> weak = viewer;
+
+            // Canal de controles: sin orden y sin reenvíos (un estado viejo no sirve de nada).
+            rtc::DataChannelInit input_init;
+            input_init.reliability.type = rtc::Reliability::Type::Rexmit;
+            input_init.reliability.unordered = true;
+            input_init.reliability.rexmit = 0;
+            viewer->input = viewer->pc->createDataChannel("input", input_init);
+            viewer->input->onMessage([&state, weak](rtc::message_variant data) {
+                auto v = weak.lock();
+                if (v && std::holds_alternative<std::string>(data))
+                    on_input_message(state, *v, std::get<std::string>(data));
+            });
 
             viewer->track->onOpen([&state]() {
                 std::printf("[web] Track de video abierto. Pidiendo fotograma completo a la PS4.\n");
@@ -452,26 +562,47 @@ namespace agent
                 return false;
             }
             {
-                std::lock_guard<std::mutex> lock(state.idr_mutex);
+                std::lock_guard<std::mutex> lock(state.session_mutex);
                 state.session = &session;
             }
 
             bool connected = false;
             uint64_t last_frames = state.frames.load();
             auto last_report = std::chrono::steady_clock::now();
+            auto last_viewer_seen = std::chrono::steady_clock::now();
             while (!g_stop && !state.session_ended)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 connected = connected || state.ps4_connected;
                 const auto now = std::chrono::steady_clock::now();
+
+                // El jugador dejó de mandar controles: soltamos todo.
+                {
+                    std::lock_guard<std::mutex> lock(state.session_mutex);
+                    if (state.input_active && now - state.last_input > kInputTimeout)
+                    {
+                        release_controls_locked(state);
+                        std::printf("[web] Sin controles del jugador: botones soltados.\n");
+                    }
+                }
+
+                size_t viewers = 0;
+                {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    viewers = state.viewers.size();
+                }
+                if (viewers > 0)
+                    last_viewer_seen = now;
+                else if (now - last_viewer_seen > kIdleSessionTimeout)
+                {
+                    std::printf("[ps4] Nadie mirando hace %lld s: cerrando la sesion.\n",
+                                static_cast<long long>(kIdleSessionTimeout.count()));
+                    break;
+                }
+
                 if (now - last_report >= std::chrono::seconds(5))
                 {
                     const uint64_t frames = state.frames.load();
-                    size_t viewers = 0;
-                    {
-                        std::lock_guard<std::mutex> lock(state.mutex);
-                        viewers = state.viewers.size();
-                    }
                     if (state.ps4_connected)
                         std::printf("[stats] %.1f fps desde la PS4, %zu navegador(es)\n", (frames - last_frames) / 5.0, viewers);
                     last_frames = frames;
@@ -480,9 +611,10 @@ namespace agent
             }
 
             {
-                std::lock_guard<std::mutex> lock(state.idr_mutex);
+                std::lock_guard<std::mutex> lock(state.session_mutex);
                 state.session = nullptr;
                 state.ps4_connected = false;
+                state.input_active = false;
             }
             chiaki_session_stop(&session);
             chiaki_session_join(&session);
@@ -521,12 +653,28 @@ namespace agent
         //    con esperas crecientes (2, 4, 8, 16, 30 s...) y la despierta por si está en reposo.
         //    Los navegadores siguen conectados; al volver la PS4, el video sigue solo.
         std::signal(SIGINT, on_ctrl_c);
+        auto viewer_count = [&state]() {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            return state.viewers.size();
+        };
         int failures = 0;
         while (!g_stop)
         {
+            // Sesión bajo demanda: sin navegadores no conectamos (el mando físico sigue libre).
+            if (viewer_count() == 0)
+            {
+                std::printf("[ps4] Sin navegadores: la PS4 queda libre. Esperando...\n");
+                while (!g_stop && viewer_count() == 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                failures = 0;
+                continue;
+            }
+
             const bool connected = run_session(state, config, log);
             if (g_stop)
                 break;
+            if (viewer_count() == 0)
+                continue; // se cerró por falta de navegadores, no por error: no reintentamos
 
             failures = connected ? 0 : failures + 1;
             // (std::min) entre paréntesis: windows.h define una macro "min" que choca con std::min.
