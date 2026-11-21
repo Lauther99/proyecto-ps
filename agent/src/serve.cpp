@@ -42,6 +42,14 @@ namespace agent
         // El SPS de la PS4 dice perfil Main (4d), restricciones 40, nivel 4.0 (28). Lo anunciamos tal cual.
         const char* const kH264Profile = "profile-level-id=4d4028;packetization-mode=1;level-asymmetry-allowed=1";
 
+        // Track de audio: la PS4 ya envía Opus (48 kHz, estéreo, tramas de 10 ms), el mismo
+        // códec que usa WebRTC, así que también se reenvía sin recodificar.
+        constexpr uint8_t kAudioPayloadType = 111;
+        constexpr uint32_t kAudioSsrc = 43;
+        const char* const kAudioCname = "ps4-audio";
+        // Mismo "msid" para audio y video: el navegador los trata como un solo stream sincronizado.
+        const char* const kStreamId = "ps4-stream";
+
         // Un navegador conectado.
         struct Viewer
         {
@@ -50,6 +58,10 @@ namespace agent
             std::shared_ptr<rtc::Track> track;
             std::shared_ptr<rtc::RtpPacketizationConfig> rtp_config;
             std::shared_ptr<rtc::RtcpSrReporter> sr_reporter;
+            std::shared_ptr<rtc::Track> audio_track;
+            std::shared_ptr<rtc::RtpPacketizationConfig> audio_rtp_config;
+            std::shared_ptr<rtc::RtcpSrReporter> audio_sr_reporter;
+            bool audio_started = false; // ¿ya se fijó la marca de tiempo inicial del audio?
         };
 
         // Estado compartido entre hilos (chiaki, libdatachannel y el principal).
@@ -68,6 +80,7 @@ namespace agent
             // Solo los toca el hilo de video de chiaki, así que no necesitan mutex.
             std::vector<uint8_t> sps;
             std::vector<uint8_t> pps;
+            std::atomic<uint32_t> audio_frame_size{480}; // muestras por trama Opus (lo informa la PS4)
             std::mutex idr_mutex;
             std::chrono::steady_clock::time_point last_idr_request{};
         };
@@ -183,7 +196,7 @@ namespace agent
             // Track de video de solo envío con H.264.
             rtc::Description::Video media(kCname, rtc::Description::Direction::SendOnly);
             media.addH264Codec(kPayloadType, std::string(kH264Profile));
-            media.addSSRC(kSsrc, std::string(kCname), std::string("ps4-stream"), std::string(kCname));
+            media.addSSRC(kSsrc, std::string(kCname), std::string(kStreamId), std::string(kCname));
             viewer->track = viewer->pc->addTrack(media);
 
             // Cadena de procesamiento: H.264 -> paquetes RTP, + informes RTCP y reenvío de perdidos.
@@ -198,6 +211,20 @@ namespace agent
             handler->addToChain(std::make_shared<rtc::RtcpNackResponder>());
             handler->addToChain(std::make_shared<KeyframeRequestHandler>([&state]() { request_keyframe(state); }));
             viewer->track->setMediaHandler(handler);
+
+            // Track de audio de solo envío con Opus.
+            rtc::Description::Audio audio_media(kAudioCname, rtc::Description::Direction::SendOnly);
+            audio_media.addOpusCodec(kAudioPayloadType);
+            audio_media.addSSRC(kAudioSsrc, std::string(kAudioCname), std::string(kStreamId), std::string(kAudioCname));
+            viewer->audio_track = viewer->pc->addTrack(audio_media);
+
+            viewer->audio_rtp_config = std::make_shared<rtc::RtpPacketizationConfig>(
+                kAudioSsrc, kAudioCname, kAudioPayloadType, rtc::OpusRtpPacketizer::defaultClockRate);
+            auto audio_handler = std::make_shared<rtc::OpusPacketizationHandler>(
+                std::make_shared<rtc::OpusRtpPacketizer>(viewer->audio_rtp_config));
+            viewer->audio_sr_reporter = std::make_shared<rtc::RtcpSrReporter>(viewer->audio_rtp_config);
+            audio_handler->addToChain(viewer->audio_sr_reporter);
+            viewer->audio_track->setMediaHandler(audio_handler);
 
             std::weak_ptr<Viewer> weak = viewer;
 
@@ -310,6 +337,56 @@ namespace agent
             return true;
         }
 
+        // chiaki: una trama de audio Opus (10 ms). Se reenvía tal cual a todos los navegadores.
+        void on_audio_frame(uint8_t* buf, size_t buf_size, void* user)
+        {
+            auto* state = static_cast<ServerState*>(user);
+            // Mismo reloj que el video: así el navegador puede sincronizar audio e imagen.
+            const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state->start).count();
+            const rtc::binary frame(reinterpret_cast<const std::byte*>(buf), reinterpret_cast<const std::byte*>(buf) + buf_size);
+
+            std::lock_guard<std::mutex> lock(state->mutex);
+            for (const auto& viewer : state->viewers)
+            {
+                if (!viewer->audio_track || !viewer->audio_track->isOpen())
+                    continue;
+                auto& cfg = *viewer->audio_rtp_config;
+                // La primera trama se ancla al reloj compartido con el video; desde ahí, cada
+                // trama avanza exactamente su duración en muestras. Así no hay huecos ni solapes
+                // aunque chiaki entregue las tramas en ráfagas.
+                if (!viewer->audio_started)
+                {
+                    cfg.timestamp = cfg.startTimestamp + cfg.secondsToTimestamp(elapsed);
+                    viewer->audio_started = true;
+                }
+                else
+                {
+                    cfg.timestamp += state->audio_frame_size.load();
+                }
+                const uint32_t since_report = cfg.timestamp - viewer->audio_sr_reporter->lastReportedTimestamp();
+                if (cfg.timestampToSeconds(since_report) > 1.0)
+                    viewer->audio_sr_reporter->setNeedsToReport();
+                try
+                {
+                    viewer->audio_track->send(frame);
+                }
+                catch (const std::exception& e)
+                {
+                    std::printf("[web] Error enviando audio: %s\n", e.what());
+                }
+            }
+        }
+
+        void on_audio_header(ChiakiAudioHeader* header, void* user)
+        {
+            auto* state = static_cast<ServerState*>(user);
+            if (header->frame_size > 0)
+                state->audio_frame_size = header->frame_size;
+            std::printf("[ps4] Audio: %u canales, %u Hz, tramas de %u muestras\n",
+                static_cast<unsigned>(header->channels), static_cast<unsigned>(header->rate),
+                static_cast<unsigned>(header->frame_size));
+        }
+
         void on_session_event(ChiakiEvent* event, void* user)
         {
             auto* state = static_cast<ServerState*>(user);
@@ -343,6 +420,14 @@ namespace agent
             state.sps.clear(); // la nueva sesión trae su propio SPS/PPS al empezar
             state.pps.clear();
 
+            // Buscamos la PS4 por su ID: si el router le dio otra IP, la usamos sin tocar archivos.
+            const std::string ip = find_ps4_ip(config.host_id, config.host, 1500);
+            if (!ip.empty() && ip != config.host)
+            {
+                std::printf("[ps4] La PS4 cambio de IP: %s -> %s\n", config.host.c_str(), ip.c_str());
+                config.set_host(ip);
+            }
+
             ChiakiSession session;
             ChiakiErrorCode err = chiaki_session_init(&session, &config.info, &log);
             if (err != CHIAKI_ERR_SUCCESS)
@@ -352,6 +437,11 @@ namespace agent
             }
             chiaki_session_set_event_cb(&session, on_session_event, &state);
             chiaki_session_set_video_sample_cb(&session, on_video_sample, &state);
+            ChiakiAudioSink audio_sink{};
+            audio_sink.user = &state;
+            audio_sink.header_cb = on_audio_header;
+            audio_sink.frame_cb = on_audio_frame;
+            chiaki_session_set_audio_sink(&session, &audio_sink);
 
             std::printf("[ps4] Conectando con %s...\n", config.host.c_str());
             err = chiaki_session_start(&session);
@@ -406,6 +496,7 @@ namespace agent
         SessionConfig config;
         if (!load_session_config(config))
             return 1;
+        config.info.audio_video_disabled = CHIAKI_NONE_DISABLED; // serve envía video y audio
 
         rtc::InitLogger(rtc::LogLevel::Warning);
 

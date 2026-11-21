@@ -31,6 +31,16 @@ export default function Ps4Player({ signalingUrl }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [status, setStatus] = useState<Status>('conectando')
   const [detail, setDetail] = useState('')
+  // Los navegadores solo permiten sonido después de un clic del usuario.
+  const [muted, setMuted] = useState(true)
+
+  const toggleSound = () => {
+    const video = videoRef.current
+    if (!video) return
+    video.muted = !video.muted
+    setMuted(video.muted)
+    void video.play()
+  }
 
   useEffect(() => {
     const ws = new WebSocket(signalingUrl)
@@ -89,10 +99,19 @@ export default function Ps4Player({ signalingUrl }: Props) {
         muted
         className="aspect-video w-full rounded-lg bg-black"
       />
-      <p className="text-sm text-zinc-500">
-        Estado: <span className="font-medium text-zinc-200">{status}</span>
-        {detail && <span className="ml-2">({detail})</span>}
-      </p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-sm text-zinc-500">
+          Estado: <span className="font-medium text-zinc-200">{status}</span>
+          {detail && <span className="ml-2">({detail})</span>}
+        </p>
+        <button
+          type="button"
+          onClick={toggleSound}
+          className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm font-medium text-zinc-100 hover:bg-zinc-700"
+        >
+          {muted ? 'Activar sonido' : 'Silenciar'}
+        </button>
+      </div>
     </div>
   )
 }

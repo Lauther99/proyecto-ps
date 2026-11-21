@@ -44,6 +44,9 @@ namespace agent
             return false;
         }
 
+        // SERVER_MAC es el mismo valor que la PS4 anuncia como "host-id" al buscarla.
+        config.host_id = env_get(reg, "SERVER_MAC");
+
         // Credencial de encendido: la clave de registro en texto, leída como número hexadecimal
         // (igual que hace chiaki-ng). Si no es válida, simplemente no despertamos la consola.
         const std::string regist_text = env_get(reg, "RP_REGIST_KEY_TEXT");
