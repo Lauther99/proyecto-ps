@@ -18,5 +18,6 @@ namespace agent
     int cmd_stream(const std::string& output_path, int seconds);
 
     // Mantiene la sesión con la PS4 y reparte el video por WebRTC (señalización WebSocket en 'port').
-    int cmd_serve(unsigned short port);
+    // Con youtube=true también transmite a YouTube Live (o a un archivo de prueba) con ffmpeg.
+    int cmd_serve(unsigned short port, bool youtube);
 }

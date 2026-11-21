@@ -19,6 +19,8 @@
 // se va el último. Así el agente no le quita el control al mando físico cuando nadie juega.
 #include "commands.hpp"
 #include "session_config.hpp"
+#include "env.hpp"
+#include "youtube.hpp"
 
 #include <chiaki/controller.h>
 #include <chiaki/discovery.h>
@@ -93,6 +95,8 @@ namespace agent
             std::vector<uint8_t> sps;
             std::vector<uint8_t> pps;
             std::atomic<uint32_t> audio_frame_size{480}; // muestras por trama Opus (lo informa la PS4)
+            // Transmisión a YouTube (solo con --youtube). Se crea antes de las sesiones y no cambia.
+            std::unique_ptr<YoutubeStreamer> youtube;
             // Protege 'session' (cambia en cada reconexión) y todo lo que se le envía a la PS4.
             std::mutex session_mutex;
             std::chrono::steady_clock::time_point last_idr_request{};
@@ -279,6 +283,15 @@ namespace agent
             send_controller_state_locked(state, controller);
         }
 
+        // ¿Hace falta una sesión con la PS4? Sí si hay navegadores o si se transmite a YouTube.
+        bool session_wanted(ServerState& state)
+        {
+            if (state.youtube)
+                return true;
+            std::lock_guard<std::mutex> lock(state.mutex);
+            return !state.viewers.empty();
+        }
+
         // Crea la conexión WebRTC para un navegador recién conectado y le envía la oferta.
         void add_viewer(ServerState& state, std::shared_ptr<rtc::WebSocket> ws)
         {
@@ -411,6 +424,11 @@ namespace agent
             if (has_idr)
                 state->idr_frames++;
 
+            // Copia para YouTube (ffmpeg la recodifica aparte; el jugador recibe el original).
+            if (state->youtube)
+                state->youtube->push_video(buf, buf_size, has_idr, state->sps.data(), state->sps.size(),
+                                           state->pps.data(), state->pps.size());
+
             // Fotograma para el empaquetador: si es IDR y no trae SPS/PPS, se los anteponemos.
             rtc::binary frame;
             frame.reserve(buf_size + 64);
@@ -451,6 +469,8 @@ namespace agent
         void on_audio_frame(uint8_t* buf, size_t buf_size, void* user)
         {
             auto* state = static_cast<ServerState*>(user);
+            if (state->youtube)
+                state->youtube->push_audio(buf, buf_size);
             // Mismo reloj que el video: así el navegador puede sincronizar audio e imagen.
             const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state->start).count();
             const rtc::binary frame(reinterpret_cast<const std::byte*>(buf), reinterpret_cast<const std::byte*>(buf) + buf_size);
@@ -586,12 +606,16 @@ namespace agent
                     }
                 }
 
+                // ffmpeg acaba de (re)conectarse y necesita un fotograma completo para empezar.
+                if (state.youtube && state.youtube->wants_keyframe())
+                    request_keyframe(state);
+
                 size_t viewers = 0;
                 {
                     std::lock_guard<std::mutex> lock(state.mutex);
                     viewers = state.viewers.size();
                 }
-                if (viewers > 0)
+                if (viewers > 0 || state.youtube)
                     last_viewer_seen = now;
                 else if (now - last_viewer_seen > kIdleSessionTimeout)
                 {
@@ -623,7 +647,7 @@ namespace agent
         }
     }
 
-    int cmd_serve(uint16_t port)
+    int cmd_serve(uint16_t port, bool youtube)
     {
         SessionConfig config;
         if (!load_session_config(config))
@@ -636,6 +660,29 @@ namespace agent
         chiaki_log_init(&log, CHIAKI_LOG_ERROR | CHIAKI_LOG_WARNING, chiaki_log_cb_print, nullptr);
 
         ServerState state;
+
+        // 0. YouTube (solo con --youtube). Sin YOUTUBE_STREAM_KEY en .env se graba un archivo de
+        //    prueba en vez de salir en vivo. La clave nunca se muestra en pantalla.
+        if (youtube)
+        {
+            const EnvMap env = load_env();
+            const std::string key = env_get(env, "YOUTUBE_STREAM_KEY");
+            const std::string ffmpeg = env_get(env, "FFMPEG_PATH", "ffmpeg");
+            const std::string encoder = env_get(env, "YOUTUBE_ENCODER", "auto");
+            std::string output, display;
+            if (!key.empty())
+            {
+                output = "rtmps://a.rtmps.youtube.com:443/live2/" + key;
+                display = "YouTube Live (rtmps://a.rtmps.youtube.com/live2/****)";
+            }
+            else
+            {
+                output = env_get(env, "YOUTUBE_TEST_FILE", "youtube-test.mkv");
+                display = "archivo de prueba " + output + " (no hay YOUTUBE_STREAM_KEY en .env)";
+            }
+            state.youtube = std::make_unique<YoutubeStreamer>(output, display, ffmpeg, encoder);
+            state.youtube->start();
+        }
 
         // 1. Servidor WebSocket de señalización (solo en esta máquina).
         rtc::WebSocketServer::Configuration ws_config;
@@ -653,18 +700,14 @@ namespace agent
         //    con esperas crecientes (2, 4, 8, 16, 30 s...) y la despierta por si está en reposo.
         //    Los navegadores siguen conectados; al volver la PS4, el video sigue solo.
         std::signal(SIGINT, on_ctrl_c);
-        auto viewer_count = [&state]() {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            return state.viewers.size();
-        };
         int failures = 0;
         while (!g_stop)
         {
-            // Sesión bajo demanda: sin navegadores no conectamos (el mando físico sigue libre).
-            if (viewer_count() == 0)
+            // Sesión bajo demanda: sin navegadores (ni YouTube) no conectamos, el mando físico sigue libre.
+            if (!session_wanted(state))
             {
                 std::printf("[ps4] Sin navegadores: la PS4 queda libre. Esperando...\n");
-                while (!g_stop && viewer_count() == 0)
+                while (!g_stop && !session_wanted(state))
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 failures = 0;
                 continue;
@@ -673,7 +716,7 @@ namespace agent
             const bool connected = run_session(state, config, log);
             if (g_stop)
                 break;
-            if (viewer_count() == 0)
+            if (!session_wanted(state))
                 continue; // se cerró por falta de navegadores, no por error: no reintentamos
 
             failures = connected ? 0 : failures + 1;
@@ -694,6 +737,8 @@ namespace agent
 
         // 3. Cierre ordenado de la parte web.
         std::printf("Cerrando...\n");
+        if (state.youtube)
+            state.youtube->stop();
         server->stop();
         {
             std::lock_guard<std::mutex> lock(state.mutex);

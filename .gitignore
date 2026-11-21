@@ -36,3 +36,4 @@ CMakeUserPresets.json
 *.exe
 *.dll
 *.lib
+*.mkv

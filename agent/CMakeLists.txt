@@ -29,6 +29,7 @@ add_executable(ps4-agent
     src/stream.cpp
     src/serve.cpp
     src/session_config.cpp
+    src/youtube.cpp
 )
 find_package(LibDataChannel CONFIG REQUIRED)   # WebRTC + WebSocket
 find_package(nlohmann_json CONFIG REQUIRED)    # JSON para la señalización
