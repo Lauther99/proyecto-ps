@@ -7,17 +7,26 @@ Thumbs.db
 # Secretos (nunca subir: credenciales PSN, tokens de Cloudflare, etc.)
 .env
 .env.*
+!.env.example
 .dev.vars
+registration.env
 *.pem
 
 # Node / Next (web/ tiene además su propio .gitignore)
 node_modules/
+
+# Python (entornos virtuales)
+venv/
+.venv/
+__pycache__/
 
 # Cloudflare Workers (worker/)
 .wrangler/
 
 # C++ (agent/)
 build/
+build-log.txt
+*.h264
 out/
 vcpkg_installed/
 CMakeUserPresets.json
