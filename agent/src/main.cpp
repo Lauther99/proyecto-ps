@@ -21,12 +21,16 @@ namespace
             "  ps4-agent discover <ip>     Consulta una IP concreta\n"
             "  ps4-agent discover --all    Busca en toda la red\n"
             "  ps4-agent register <codigo> Vincula con la PS4 (codigo de 8 digitos)\n"
-            "  ps4-agent stream [seg]      Guarda video en capture.h264 (15 s por defecto)\n");
+            "  ps4-agent stream [seg]      Guarda video en capture.h264 (15 s por defecto)\n"
+            "  ps4-agent serve             Transmite al navegador por WebRTC (ws://localhost:8000)\n");
     }
 }
 
 int main(int argc, char* argv[])
 {
+    // Sin búfer: los mensajes salen al instante aunque la salida vaya a un archivo.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+
     if (argc < 2)
     {
         print_usage();
@@ -74,6 +78,9 @@ int main(int argc, char* argv[])
         const int seconds = (argc >= 3) ? std::atoi(argv[2]) : 15;
         return agent::cmd_stream("capture.h264", seconds > 0 ? seconds : 15);
     }
+
+    if (command == "serve")
+        return agent::cmd_serve(8000);
 
     print_usage();
     return 1;

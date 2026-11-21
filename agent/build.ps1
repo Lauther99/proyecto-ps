@@ -22,16 +22,31 @@ if (-not (Test-Path venv\Scripts\python.exe)) {
     .\venv\Scripts\python.exe -m pip install --quiet protobuf grpcio-tools requests
 }
 
+# 3. Submódulos y parche de gf-complete (lo exige la compilación de chiaki en Windows).
+#    Se aplica solo si falta, así el script sirve también en un clon recién hecho.
+$ErrorActionPreference = 'Continue'
+$chiaki = Join-Path $PSScriptRoot 'third_party\chiaki-ng'
+if (-not (Test-Path "$chiaki\third-party\gf-complete\src")) {
+    git -C $PSScriptRoot\.. submodule update --init agent/third_party/chiaki-ng
+    git -C $chiaki submodule update --init --depth 1 third-party/nanopb third-party/jerasure third-party/gf-complete third-party/curl
+}
+$gfPatch = 'scripts/windows-vc/gf-complete.patch'
+git -C $chiaki apply --reverse --check --ignore-whitespace --directory=third-party/gf-complete/ $gfPatch 2>$null
+if ($LASTEXITCODE -ne 0) {
+    git -C $chiaki apply --ignore-whitespace --directory=third-party/gf-complete/ $gfPatch
+    if ($LASTEXITCODE -ne 0) { throw "No se pudo aplicar el parche de gf-complete" }
+    Write-Host "Parche de gf-complete aplicado"
+}
+
 # chiaki aplica un parche a curl con "git apply" dentro de build/. Como build/ está dentro
 # de nuestro repo, git se salta el parche ("Skipped patch"). El techo evita que git
 # encuentre nuestro repo desde build/ y lo aplique como un parche normal.
 # Techo = agent/: desde build/ git no puede subir a agent/ ni más arriba.
 $env:GIT_CEILING_DIRECTORIES = $PSScriptRoot
 
-# 3. Configurar y compilar
+# 4. Configurar y compilar
 # En PowerShell 5.1, 'Stop' convierte cualquier aviso de CMake (stderr) en error fatal.
 # Para los comandos nativos usamos 'Continue' y revisamos $LASTEXITCODE.
-$ErrorActionPreference = 'Continue'
 # CMake ejecuta "git apply" desde su carpeta actual, así que configuramos desde build/
 # (debajo del techo de git) indicando el código fuente con -S.
 New-Item -ItemType Directory -Force build | Out-Null

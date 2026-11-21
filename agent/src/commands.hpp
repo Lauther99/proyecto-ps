@@ -13,4 +13,7 @@ namespace agent
 
     // Abre una sesión de Remote Play y guarda 'seconds' segundos de video H.264 en 'output_path'.
     int cmd_stream(const std::string& output_path, int seconds);
+
+    // Mantiene la sesión con la PS4 y reparte el video por WebRTC (señalización WebSocket en 'port').
+    int cmd_serve(unsigned short port);
 }

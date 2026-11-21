@@ -27,5 +27,14 @@ add_executable(ps4-agent
     src/discover.cpp
     src/register.cpp
     src/stream.cpp
+    src/serve.cpp
+    src/session_config.cpp
 )
-target_link_libraries(ps4-agent PRIVATE chiaki-lib)
+find_package(LibDataChannel CONFIG REQUIRED)   # WebRTC + WebSocket
+find_package(nlohmann_json CONFIG REQUIRED)    # JSON para la señalización
+
+target_link_libraries(ps4-agent PRIVATE
+    chiaki-lib
+    LibDataChannel::LibDataChannel
+    nlohmann_json::nlohmann_json
+)

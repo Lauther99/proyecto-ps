@@ -9,6 +9,11 @@
     "opus",
     "libevent",
     "pkgconf",
-    "protobuf"
+    "protobuf",
+    {
+      "name": "libdatachannel",
+      "features": [ "srtp", "ws" ]
+    },
+    "nlohmann-json"
   ]
 }

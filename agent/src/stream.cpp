@@ -1,9 +1,8 @@
 // Comando "stream": abre una sesión de Remote Play y guarda el video H.264 en un archivo.
 // Prueba de la fase 1: si el archivo se ve con ffplay, el agente recibe video de la PS4.
 #include "commands.hpp"
-#include "env.hpp"
+#include "session_config.hpp"
 
-#include <chiaki/base64.h>
 #include <chiaki/log.h>
 #include <chiaki/session.h>
 
@@ -27,21 +26,6 @@ namespace agent
             std::atomic<bool> connected{false};
             std::atomic<bool> quit{false};
         };
-
-        // Convierte "a1b2..." en bytes. Devuelve false si el texto no tiene el largo esperado.
-        bool from_hex(const std::string& hex, uint8_t* out, size_t size)
-        {
-            if (hex.size() != size * 2)
-                return false;
-            for (size_t i = 0; i < size; ++i)
-            {
-                unsigned value = 0;
-                if (std::sscanf(hex.c_str() + i * 2, "%2x", &value) != 1)
-                    return false;
-                out[i] = static_cast<uint8_t>(value);
-            }
-            return true;
-        }
 
         // Llamada por chiaki por cada fotograma de video completo (H.264 en formato Annex B).
         bool on_video_sample(uint8_t* buf, size_t buf_size, int32_t frames_lost, bool /*frame_recovered*/, void* user)
@@ -82,48 +66,12 @@ namespace agent
 
     int cmd_stream(const std::string& output_path, int seconds)
     {
-        // 1. Leer las claves de registration.env.
-        const EnvMap reg = load_env_file("registration.env");
-        const std::string host = env_get(reg, "PS4_HOST");
-        if (host.empty())
-        {
-            std::printf("No se encontro registration.env. Ejecuta primero: ps4-agent register <codigo>\n");
+        // 1-2. Claves y configuración de la sesión (720p a 60 fps, H.264, sin audio).
+        SessionConfig config;
+        if (!load_session_config(config))
             return 1;
-        }
-
-        ChiakiConnectInfo info{};
-        if (!from_hex(env_get(reg, "RP_REGIST_KEY"), reinterpret_cast<uint8_t*>(info.regist_key), sizeof(info.regist_key))
-            || !from_hex(env_get(reg, "RP_KEY"), info.morning, sizeof(info.morning)))
-        {
-            std::printf("registration.env tiene claves invalidas. Vuelve a registrar.\n");
-            return 1;
-        }
-
-        // El AccountID viene del .env normal.
-        const EnvMap env = load_env();
-        const std::string account_b64 = env_get(env, "PSN_ACCOUNT_ID");
-        size_t account_size = sizeof(info.psn_account_id);
-        if (chiaki_base64_decode(account_b64.c_str(), account_b64.size(), info.psn_account_id, &account_size) != CHIAKI_ERR_SUCCESS
-            || account_size != CHIAKI_PSN_ACCOUNT_ID_SIZE)
-        {
-            std::printf("PSN_ACCOUNT_ID invalido en .env\n");
-            return 1;
-        }
-
-        // 2. Configuración de la sesión: PS4, 720p a 60 fps (máximo de una PS4 normal), H.264.
-        info.ps5 = false;
-        info.host = host.c_str();
-        chiaki_connect_video_profile_preset(&info.video_profile, CHIAKI_VIDEO_RESOLUTION_PRESET_720p, CHIAKI_VIDEO_FPS_PRESET_60);
-        info.video_profile.codec = CHIAKI_CODEC_H264;
-        info.video_profile_auto_downgrade = true;
-        info.enable_keyboard = false;
-        info.enable_dualsense = false;
-        info.audio_video_disabled = CHIAKI_AUDIO_DISABLED; // fase 1: solo video
-        info.auto_regist = false;
-        info.holepunch_session = nullptr;
-        info.rudp_sock = nullptr;
-        info.packet_loss_max = 0.05;
-        info.enable_idr_on_fec_failure = true;
+        ChiakiConnectInfo& info = config.info;
+        const std::string& host = config.host;
 
         StreamState state;
         state.file = std::fopen(output_path.c_str(), "wb");
