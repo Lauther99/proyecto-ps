@@ -1,0 +1,29 @@
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secretos (nunca subir: credenciales PSN, tokens de Cloudflare, etc.)
+.env
+.env.*
+.dev.vars
+*.pem
+
+# Node / Next (web/ tiene además su propio .gitignore)
+node_modules/
+
+# Cloudflare Workers (worker/)
+.wrangler/
+
+# C++ (agent/)
+build/
+out/
+vcpkg_installed/
+CMakeUserPresets.json
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
