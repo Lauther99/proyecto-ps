@@ -13,6 +13,22 @@ npm run db:migrate:local
 npm run dev                        # http://localhost:8787
 ```
 
+Mientras desarrollas, corre también el frontend (`npm run dev` en `web/`, puerto 3000): Next
+reenvía `/api` a este backend.
+
+Para ver la app como quedará desplegada (un solo Worker sirviendo frontend + API, sin Next):
+
+```powershell
+npm run preview                    # http://localhost:8787 (exporta web/ y la sirve desde el Worker)
+```
+
+Despliegue (un solo proyecto en Cloudflare):
+
+```powershell
+npm run db:migrate:remote          # la primera vez y cuando haya migraciones nuevas
+npm run deploy                     # exporta web/ y sube el Worker con los archivos
+```
+
 Pruebas:
 
 ```powershell

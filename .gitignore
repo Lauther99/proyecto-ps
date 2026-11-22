@@ -37,4 +37,4 @@ CMakeUserPresets.json
 *.dll
 *.lib
 *.mkv
-.wrangler-dev.log
+.wrangler-*.log

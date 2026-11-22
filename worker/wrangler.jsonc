@@ -6,6 +6,15 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
 
+  // Frontend: los archivos que exporta Next (web/out) los sirve este mismo Worker. Solo /api/*
+  // pasa por el código; el resto (/, /admin, JS, CSS) se entrega directo como archivo, sin gastar
+  // solicitudes del Worker. Se genera con "npm run build:web".
+  "assets": {
+    "directory": "../web/out",
+    "run_worker_first": ["/api/*"],
+    "not_found_handling": "404-page"
+  },
+
   // Una sola sala (una consola) por ahora; el código ya admite varias por nombre.
   "durable_objects": {
     "bindings": [{ "name": "ROOM", "class_name": "Room" }]
