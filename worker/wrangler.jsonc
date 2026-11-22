@@ -1,0 +1,37 @@
+// Backend de la sala: login con Google, usuarios aprobados, cola de turnos y señalización
+// entre el navegador del jugador y el agente (que corre en la casa, detrás del CGNAT).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ps4-room",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+
+  // Una sola sala (una consola) por ahora; el código ya admite varias por nombre.
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+
+  // Usuarios, sesiones e historial de turnos. Para desarrollo local el id puede ser cualquiera;
+  // al desplegar se reemplaza por el de "wrangler d1 create ps4-room".
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ps4-room",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "vars": {
+    // Dirección del frontend (Next). Se usa para redirigir tras el login y para validar el Origin.
+    "APP_URL": "http://localhost:3000",
+    // Correos que entran ya aprobados y como admin (separados por coma).
+    "ADMIN_EMAILS": ""
+  }
+  // Secretos (en .dev.vars para local, "wrangler secret put" al desplegar):
+  //   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET   credenciales OAuth de Google Cloud
+  //   AGENT_TOKEN                              clave compartida con el agente de la casa
+  //   TURN_KEY_ID, TURN_KEY_API_TOKEN          Cloudflare Realtime TURN (opcional en local)
+  //   DEV_LOGIN=true                           SOLO local: login sin Google para pruebas
+}

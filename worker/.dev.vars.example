@@ -1,0 +1,10 @@
+# Copia como .dev.vars (no se sube a git). Solo para desarrollo local.
+DEV_LOGIN=true
+AGENT_TOKEN=cambia-esto-por-un-token-largo
+ADMIN_EMAILS=tu-correo@gmail.com
+# Login con Google (Google Cloud Console > Credenciales > ID de cliente OAuth):
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+# TURN de Cloudflare Realtime (opcional en local):
+# TURN_KEY_ID=
+# TURN_KEY_API_TOKEN=
