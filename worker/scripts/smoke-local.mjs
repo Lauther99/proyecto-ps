@@ -119,9 +119,18 @@ playerWs.send({ type: 'accept' })
 const toAgent = await agent.wait((m) => m.type === 'player' && m.player?.userId === player.user.id)
 check('agente recibe al nuevo jugador', toAgent.player.isAdmin === false)
 
+// El jugador tiene la sala abierta en dos pestañas: juega la que pide oferta ("ready").
+const secondTab = await connect('/api/room/ws', { Origin: ORIGIN, Cookie: player.cookie })
+playerWs.send({ type: 'signal', data: { type: 'ready' } })
+const ready = await agent.wait((m) => m.type === 'signal' && m.data?.type === 'ready')
+check('agente recibe "ready" del jugador', Boolean(ready))
+
 agent.send({ type: 'signal', data: { type: 'offer', sdp: 'v=0 prueba' } })
 const sig = await playerWs.wait((m) => m.type === 'signal')
 check('señal agente -> jugador', sig.data.sdp === 'v=0 prueba')
+const leaked = await secondTab.wait((m) => m.type === 'signal', 500).then(() => true, () => false)
+check('la otra pestaña del mismo jugador no recibe la oferta', !leaked)
+secondTab.close()
 
 playerWs.send({ type: 'signal', data: { type: 'answer', sdp: 'v=0 respuesta' } })
 const back = await agent.wait((m) => m.type === 'signal')

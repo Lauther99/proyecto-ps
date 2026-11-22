@@ -11,17 +11,21 @@
 //   {type:"signal", data}                      solo al jugador actual (viene del agente)
 //   {type:"error", message}
 // Agente -> sala:   {type:"signal", data}  {type:"status", ps4:boolean}
-// Sala -> agente:   {type:"player", player:{userId,name,isAdmin}|null}  {type:"youtube", on}  {type:"signal", data}
+// Sala -> agente:   {type:"player", player:{userId,name,isAdmin}|null, iceServers:[...]}
+//                   {type:"youtube", on}  {type:"signal", data}
+// Señales del navegador al agente (data): {type:"ready"} pide oferta nueva, {type:"answer", sdp}.
+// Señales del agente al navegador (data): {type:"offer", sdp}.
 
 import { DurableObject } from 'cloudflare:workers'
 import type { Env } from './env'
 import * as logic from './room-logic'
 import type { Result, RoomState } from './room-logic'
+import { getIceServers } from './turn'
 
 const MAX_MESSAGE_BYTES = 64 * 1024 // una SDP ocupa unos pocos KB
 
 type Attachment =
-  | { kind: 'browser'; userId: string; name: string; isAdmin: boolean }
+  | { kind: 'browser'; userId: string; name: string; isAdmin: boolean; sid: string } // sid: id de esta pestaña
   | { kind: 'agent' }
 
 type Extras = {
@@ -34,6 +38,7 @@ export type PublicState = RoomState & Extras & { agentOnline: boolean; now: numb
 export class Room extends DurableObject<Env> {
   private state: RoomState = logic.initialState()
   private extras: Extras = { youtube: false, ps4Connected: false }
+  private playerSid: string | null = null // pestaña del jugador que negocia con el agente
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -43,6 +48,7 @@ export class Room extends DurableObject<Env> {
     ctx.blockConcurrencyWhile(async () => {
       this.state = (await ctx.storage.get<RoomState>('state')) ?? logic.initialState()
       this.extras = (await ctx.storage.get<Extras>('extras')) ?? this.extras
+      this.playerSid = (await ctx.storage.get<string>('playerSid')) ?? null
     })
   }
 
@@ -58,9 +64,11 @@ export class Room extends DurableObject<Env> {
       for (const old of this.ctx.getWebSockets('agent')) old.close(4000, 'Reemplazado por otro agente')
       this.ctx.acceptWebSocket(server, ['agent'])
       server.serializeAttachment({ kind: 'agent' } satisfies Attachment)
-      this.send(server, { type: 'player', player: this.playerForAgent() })
+      this.send(server, await this.playerMessage())
       this.send(server, { type: 'youtube', on: this.extras.youtube })
       this.broadcastState()
+      const headers = request.headers.get('X-Agent-Subprotocol') ? { 'Sec-WebSocket-Protocol': 'ps4-agent' } : undefined
+      return new Response(null, { status: 101, webSocket: client, headers })
     } else {
       const userId = request.headers.get('X-User-Id') ?? ''
       const attachment: Attachment = {
@@ -68,6 +76,7 @@ export class Room extends DurableObject<Env> {
         userId,
         name: decodeURIComponent(request.headers.get('X-User-Name') ?? 'Jugador'),
         isAdmin: request.headers.get('X-User-Admin') === '1',
+        sid: crypto.randomUUID(),
       }
       this.ctx.acceptWebSocket(server, ['browser', `user:${userId}`])
       server.serializeAttachment(attachment)
@@ -98,10 +107,20 @@ export class Room extends DurableObject<Env> {
         return this.apply(logic.leave(this.state, who.userId, now))
       case 'accept':
         return this.apply(logic.accept(this.state, who.userId, who.isAdmin, now))
-      case 'signal':
-        // Solo el jugador actual negocia WebRTC con el agente.
-        if (this.state.current?.userId === who.userId) this.sendToAgent({ type: 'signal', data: msg.data })
+      case 'signal': {
+        // Solo el jugador actual negocia WebRTC con el agente. Si tiene la sala abierta en varias
+        // pestañas, juega la última que pidió oferta ("ready"): las respuestas del agente van solo ahí.
+        if (this.state.current?.userId !== who.userId) return
+        const kind = (msg.data as { type?: string } | null)?.type
+        if (kind === 'ready') {
+          this.playerSid = who.sid
+          await this.ctx.storage.put('playerSid', who.sid)
+        } else if (who.sid !== this.playerSid) {
+          return // respuesta de una pestaña que ya no es la activa
+        }
+        this.sendToAgent({ type: 'signal', data: msg.data })
         return
+      }
       case 'admin':
         if (!who.isAdmin) return this.send(ws, { type: 'error', message: 'Solo el admin puede hacer eso' })
         return this.onAdminAction(member, msg.action, msg.value)
@@ -157,7 +176,10 @@ export class Room extends DurableObject<Env> {
     if (msg.type === 'signal') {
       const current = this.state.current
       if (!current) return
-      for (const ws of this.ctx.getWebSockets(`user:${current.userId}`)) this.send(ws, { type: 'signal', data: msg.data })
+      for (const ws of this.ctx.getWebSockets(`user:${current.userId}`)) {
+        const who = ws.deserializeAttachment() as Attachment | null
+        if (who?.kind === 'browser' && who.sid === this.playerSid) this.send(ws, { type: 'signal', data: msg.data })
+      }
     } else if (msg.type === 'status') {
       this.extras.ps4Connected = msg.ps4 === true
       await this.ctx.storage.put('extras', this.extras)
@@ -188,13 +210,16 @@ export class Room extends DurableObject<Env> {
     if (deadline === null) await this.ctx.storage.deleteAlarm()
     else await this.ctx.storage.setAlarm(deadline)
 
-    if ((this.state.current?.userId ?? null) !== before) this.sendToAgent({ type: 'player', player: this.playerForAgent() })
+    if ((this.state.current?.userId ?? null) !== before) this.sendToAgent(await this.playerMessage())
     this.broadcastState()
   }
 
-  private playerForAgent() {
+  // Aviso al agente de quién juega. Incluye los servidores ICE (TURN) para esa conexión, así el
+  // agente no necesita pedirlos por HTTP.
+  private async playerMessage() {
     const c = this.state.current
-    return c ? { userId: c.userId, name: c.name, isAdmin: c.isAdmin } : null
+    const player = c ? { userId: c.userId, name: c.name, isAdmin: c.isAdmin } : null
+    return { type: 'player', player, iceServers: player ? await getIceServers(this.env) : [] }
   }
 
   private publicState(): PublicState {

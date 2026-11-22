@@ -23,7 +23,9 @@ namespace
             "  ps4-agent register <codigo> Vincula con la PS4 (codigo de 8 digitos)\n"
             "  ps4-agent stream [seg]      Guarda video en capture.h264 (15 s por defecto)\n"
             "  ps4-agent serve             Transmite al navegador por WebRTC (ws://localhost:8000)\n"
-            "  ps4-agent serve --youtube   Ademas transmite a YouTube Live (sin clave: youtube-test.mkv)\n");
+            "  ps4-agent serve --youtube   Ademas transmite a YouTube Live (sin clave: youtube-test.mkv)\n"
+            "  ps4-agent serve --room      Ademas se conecta a la sala de Cloudflare (ROOM_URL, AGENT_TOKEN)\n"
+            "                              (--youtube y --room se pueden combinar)\n");
     }
 }
 
@@ -81,7 +83,16 @@ int main(int argc, char* argv[])
     }
 
     if (command == "serve")
-        return agent::cmd_serve(8000, argc >= 3 && std::string(argv[2]) == "--youtube");
+    {
+        bool youtube = false, room = false;
+        for (int i = 2; i < argc; ++i)
+        {
+            const std::string flag = argv[i];
+            youtube = youtube || flag == "--youtube";
+            room = room || flag == "--room";
+        }
+        return agent::cmd_serve(8000, youtube, room);
+    }
 
     print_usage();
     return 1;

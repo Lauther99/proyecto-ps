@@ -19,5 +19,6 @@ namespace agent
 
     // Mantiene la sesión con la PS4 y reparte el video por WebRTC (señalización WebSocket en 'port').
     // Con youtube=true también transmite a YouTube Live (o a un archivo de prueba) con ffmpeg.
-    int cmd_serve(unsigned short port, bool youtube);
+    // room=true: además se conecta a la sala de Cloudflare (ROOM_URL y AGENT_TOKEN en .env).
+    int cmd_serve(unsigned short port, bool youtube, bool room);
 }

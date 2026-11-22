@@ -17,6 +17,11 @@
 //
 // La sesión con la PS4 se abre solo cuando hay navegadores, y se cierra 30 s después de que
 // se va el último. Así el agente no le quita el control al mando físico cuando nadie juega.
+//
+// Modo sala (--room): además, el agente se conecta HACIA la sala de Cloudflare (ROOM_URL y
+// AGENT_TOKEN en .env), así funciona detrás del CGNAT. La sala le dice quién tiene el turno; el
+// agente le ofrece WebRTC a ese navegador a través de la sala, y ese navegador es quien controla.
+// Solo si el jugador es admin se deja pasar el botón PS. La sala también enciende/apaga YouTube.
 #include "commands.hpp"
 #include "session_config.hpp"
 #include "env.hpp"
@@ -65,7 +70,11 @@ namespace agent
         // Un navegador conectado.
         struct Viewer
         {
-            std::shared_ptr<rtc::WebSocket> ws;
+            // Manda una señal ({"type":"offer",...}) por donde corresponda: WebSocket local o sala.
+            std::function<void(const json&)> send_signal;
+            bool from_room = false; // el jugador del turno (tiene prioridad para controlar)
+            bool allow_ps = false;  // botón PS permitido (solo el admin)
+            std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
             std::shared_ptr<rtc::PeerConnection> pc;
             std::shared_ptr<rtc::Track> track;
             std::shared_ptr<rtc::RtpPacketizationConfig> rtp_config;
@@ -95,8 +104,20 @@ namespace agent
             std::vector<uint8_t> sps;
             std::vector<uint8_t> pps;
             std::atomic<uint32_t> audio_frame_size{480}; // muestras por trama Opus (lo informa la PS4)
-            // Transmisión a YouTube (solo con --youtube). Se crea antes de las sesiones y no cambia.
-            std::unique_ptr<YoutubeStreamer> youtube;
+            // Transmisión a YouTube. Se puede encender y apagar en marcha (--youtube o desde la sala),
+            // por eso es un puntero atómico: los hilos de chiaki leen una copia y la usan tranquilos.
+            std::atomic<std::shared_ptr<YoutubeStreamer>> youtube;
+            std::atomic<bool> youtube_wanted{false};
+            struct YoutubeSettings
+            {
+                std::string output, display, ffmpeg, encoder;
+            } youtube_settings;
+            // Enlace con la sala de Cloudflare (modo --room), protegido por room_mutex.
+            std::mutex room_mutex;
+            std::shared_ptr<rtc::WebSocket> room_ws;
+            std::shared_ptr<Viewer> room_viewer;       // conexión WebRTC con el jugador del turno
+            json room_player;                          // {userId,name,isAdmin} o null
+            std::vector<rtc::IceServer> room_ice;      // servidores TURN que manda la sala
             // Protege 'session' (cambia en cada reconexión) y todo lo que se le envía a la PS4.
             std::mutex session_mutex;
             std::chrono::steady_clock::time_point last_idr_request{};
@@ -241,12 +262,16 @@ namespace agent
         // Un mensaje del canal "input". Solo se aplica si viene del jugador.
         void on_input_message(ServerState& state, Viewer& viewer, const std::string& text)
         {
-            // ¿Es el jugador? El primer navegador de la lista con el canal de controles abierto.
+            // ¿Es el jugador? El del turno de la sala si lo hay; si no, el primer navegador local
+            // con el canal de controles abierto.
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
                 Viewer* player = nullptr;
                 for (const auto& v : state.viewers)
-                    if (v->input && v->input->isOpen()) { player = v.get(); break; }
+                    if (v->from_room && v->input && v->input->isOpen()) { player = v.get(); break; }
+                if (!player)
+                    for (const auto& v : state.viewers)
+                        if (v->input && v->input->isOpen()) { player = v.get(); break; }
                 if (player != &viewer)
                     return;
             }
@@ -261,8 +286,10 @@ namespace agent
                     return; // llegó tarde: ya aplicamos uno más nuevo
                 viewer.last_input_seq = seq;
 
-                // Filtro del botón PS: nadie puede salir del juego ni cambiar de perfil.
-                const uint32_t buttons = msg.value("b", 0u) & 0xffffu & ~uint32_t(CHIAKI_CONTROLLER_BUTTON_PS);
+                // Filtro del botón PS: nadie puede salir del juego ni cambiar de perfil, salvo el admin.
+                uint32_t buttons = msg.value("b", 0u) & 0xffffu;
+                if (!viewer.allow_ps)
+                    buttons &= ~uint32_t(CHIAKI_CONTROLLER_BUTTON_PS);
                 controller.buttons = buttons;
                 controller.l2_state = clamp_trigger(msg.value("l2", json(0)));
                 controller.r2_state = clamp_trigger(msg.value("r2", json(0)));
@@ -286,22 +313,28 @@ namespace agent
         // ¿Hace falta una sesión con la PS4? Sí si hay navegadores o si se transmite a YouTube.
         bool session_wanted(ServerState& state)
         {
-            if (state.youtube)
+            if (state.youtube.load())
                 return true;
             std::lock_guard<std::mutex> lock(state.mutex);
             return !state.viewers.empty();
         }
 
-        // Crea la conexión WebRTC para un navegador recién conectado y le envía la oferta.
-        void add_viewer(ServerState& state, std::shared_ptr<rtc::WebSocket> ws)
+        // Crea la conexión WebRTC para un navegador, la registra y empieza a armar la oferta, que se
+        // envía con 'send_signal' cuando termina de reunir candidatos.
+        std::shared_ptr<Viewer> create_viewer(ServerState& state, std::function<void(const json&)> send_signal,
+                                              const std::vector<rtc::IceServer>& ice_servers, bool from_room,
+                                              bool allow_ps)
         {
             auto viewer = std::make_shared<Viewer>();
-            viewer->ws = ws;
+            viewer->send_signal = std::move(send_signal);
+            viewer->from_room = from_room;
+            viewer->allow_ps = allow_ps;
             // Sin negociación automática: al crear el canal de controles, libdatachannel generaría
             // la oferta por su cuenta antes de que registremos los callbacks, y en red local la
             // reunión de candidatos termina tan rápido que nunca enviaríamos la oferta.
             rtc::Configuration pc_config;
             pc_config.disableAutoNegotiation = true;
+            pc_config.iceServers = ice_servers;
             viewer->pc = std::make_shared<rtc::PeerConnection>(pc_config);
 
             // Track de video de solo envío con H.264.
@@ -367,11 +400,58 @@ namespace agent
                     return;
                 if (auto desc = v->pc->localDescription())
                 {
-                    json offer = {{"type", "offer"}, {"sdp", std::string(*desc)}};
-                    v->ws->send(offer.dump());
-                    std::printf("[web] Oferta enviada al navegador.\n");
+                    v->send_signal(json{{"type", "offer"}, {"sdp", std::string(*desc)}});
+                    std::printf("[web] Oferta enviada al navegador%s.\n", v->from_room ? " (sala)" : "");
                 }
             });
+
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                state.viewers.push_back(viewer);
+            }
+
+            viewer->pc->setLocalDescription(); // genera la oferta y empieza a reunir candidatos
+            return viewer;
+        }
+
+        // Aplica la respuesta SDP del navegador.
+        void apply_answer(Viewer& viewer, const json& message)
+        {
+            try
+            {
+                viewer.pc->setRemoteDescription(rtc::Description(message.at("sdp").get<std::string>(), "answer"));
+                std::printf("[web] Respuesta recibida del navegador%s.\n", viewer.from_room ? " (sala)" : "");
+            }
+            catch (const std::exception& e)
+            {
+                std::printf("[web] Respuesta invalida: %s\n", e.what());
+            }
+        }
+
+        // Quita un navegador de la lista y cierra su conexión WebRTC.
+        void remove_viewer(ServerState& state, const std::shared_ptr<Viewer>& viewer)
+        {
+            if (!viewer)
+                return;
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                std::erase_if(state.viewers, [&](const auto& item) { return item == viewer; });
+            }
+            viewer->pc->close();
+        }
+
+        // Navegador en la misma laptop (página /local-player), señalización por WebSocket local.
+        void add_local_viewer(ServerState& state, std::shared_ptr<rtc::WebSocket> ws)
+        {
+            std::weak_ptr<rtc::WebSocket> weak_ws = ws;
+            auto viewer = create_viewer(
+                state,
+                [weak_ws](const json& message) {
+                    if (auto w = weak_ws.lock(); w && w->isOpen())
+                        w->send(message.dump());
+                },
+                {}, false, false);
+            std::weak_ptr<Viewer> weak = viewer;
 
             ws->onMessage([weak](rtc::message_variant data) {
                 auto v = weak.lock();
@@ -381,10 +461,7 @@ namespace agent
                 {
                     const json message = json::parse(std::get<std::string>(data));
                     if (message.value("type", "") == "answer")
-                    {
-                        v->pc->setRemoteDescription(rtc::Description(message.at("sdp").get<std::string>(), "answer"));
-                        std::printf("[web] Respuesta recibida del navegador.\n");
-                    }
+                        apply_answer(*v, message);
                 }
                 catch (const std::exception& e)
                 {
@@ -393,18 +470,231 @@ namespace agent
             });
 
             ws->onClosed([&state, weak]() {
+                remove_viewer(state, weak.lock());
                 std::lock_guard<std::mutex> lock(state.mutex);
-                auto v = weak.lock();
-                std::erase_if(state.viewers, [&](const auto& item) { return item == v; });
                 std::printf("[web] Navegador desconectado. Quedan %zu.\n", state.viewers.size());
             });
+        }
 
+        // --- Sala de Cloudflare (modo --room) ---
+
+        // Manda un mensaje a la sala si estamos conectados.
+        void send_room(ServerState& state, const json& message)
+        {
+            std::lock_guard<std::mutex> lock(state.room_mutex);
+            if (state.room_ws && state.room_ws->isOpen())
+                state.room_ws->send(message.dump());
+        }
+
+        // Convierte los servidores ICE que manda la sala (formato del navegador) al de libdatachannel.
+        // libdatachannel (con libjuice) solo usa TURN por UDP, así que se ignoran los TCP/TLS.
+        std::vector<rtc::IceServer> parse_ice_servers(const json& list)
+        {
+            std::vector<rtc::IceServer> result;
+            if (!list.is_array())
+                return result;
+            for (const auto& server : list)
             {
-                std::lock_guard<std::mutex> lock(state.mutex);
-                state.viewers.push_back(viewer);
+                std::vector<std::string> urls;
+                const json u = server.value("urls", json());
+                if (u.is_string())
+                    urls.push_back(u.get<std::string>());
+                else if (u.is_array())
+                    for (const auto& x : u)
+                        if (x.is_string())
+                            urls.push_back(x.get<std::string>());
+                const std::string username = server.value("username", "");
+                const std::string credential = server.value("credential", "");
+                for (const std::string& url : urls)
+                {
+                    // Forma: "stun:host:puerto" o "turn:host:puerto?transport=udp"
+                    const size_t colon = url.find(':');
+                    if (colon == std::string::npos)
+                        continue;
+                    const std::string scheme = url.substr(0, colon);
+                    std::string rest = url.substr(colon + 1);
+                    std::string query;
+                    if (const size_t q = rest.find('?'); q != std::string::npos)
+                    {
+                        query = rest.substr(q + 1);
+                        rest = rest.substr(0, q);
+                    }
+                    const size_t port_sep = rest.rfind(':');
+                    const std::string host = port_sep == std::string::npos ? rest : rest.substr(0, port_sep);
+                    const uint16_t port = static_cast<uint16_t>(
+                        port_sep == std::string::npos ? 3478 : std::atoi(rest.c_str() + port_sep + 1));
+                    try
+                    {
+                        if (scheme == "stun")
+                            result.emplace_back(host, port);
+                        else if (scheme == "turn" && query.find("transport=tcp") == std::string::npos)
+                            result.emplace_back(host, port, username, credential, rtc::IceServer::RelayType::TurnUdp);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::printf("[sala] Servidor ICE ignorado (%s): %s\n", url.c_str(), e.what());
+                    }
+                }
             }
+            return result;
+        }
 
-            viewer->pc->setLocalDescription(); // genera la oferta y empieza a reunir candidatos
+        // Cierra la conexión WebRTC con el jugador de la sala (cambió el turno o no hay nadie).
+        void drop_room_viewer_locked(ServerState& state)
+        {
+            if (state.room_viewer)
+            {
+                remove_viewer(state, state.room_viewer);
+                state.room_viewer.reset();
+                std::printf("[sala] Conexion con el jugador cerrada.\n");
+            }
+        }
+
+        void on_room_message(ServerState& state, const std::string& text)
+        {
+            json msg;
+            try
+            {
+                msg = json::parse(text);
+            }
+            catch (...)
+            {
+                return;
+            }
+            const std::string type = msg.value("type", "");
+
+            if (type == "player")
+            {
+                std::lock_guard<std::mutex> lock(state.room_mutex);
+                const json player = msg.value("player", json());
+                const std::string old_id = state.room_player.is_object() ? state.room_player.value("userId", "") : "";
+                const std::string new_id = player.is_object() ? player.value("userId", "") : "";
+                state.room_player = player;
+                state.room_ice = parse_ice_servers(msg.value("iceServers", json::array()));
+                if (old_id != new_id)
+                {
+                    drop_room_viewer_locked(state);
+                    if (new_id.empty())
+                        std::printf("[sala] Nadie tiene el turno.\n");
+                    else
+                        std::printf("[sala] Turno de %s%s.\n", player.value("name", "?").c_str(),
+                                    player.value("isAdmin", false) ? " (admin)" : "");
+                }
+            }
+            else if (type == "signal")
+            {
+                const json data = msg.value("data", json());
+                const std::string kind = data.is_object() ? data.value("type", "") : "";
+                std::unique_lock<std::mutex> lock(state.room_mutex);
+                if (!state.room_player.is_object())
+                    return;
+                if (kind == "ready")
+                {
+                    // El navegador del jugador pide una oferta. Si acabamos de mandar una (menos de
+                    // 3 s), no la repetimos: el navegador reintenta por si se perdió la primera.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (state.room_viewer && now - state.room_viewer->created < std::chrono::seconds(3))
+                        return;
+                    drop_room_viewer_locked(state);
+                    const bool is_admin = state.room_player.value("isAdmin", false);
+                    std::weak_ptr<rtc::WebSocket> weak_ws = state.room_ws;
+                    state.room_viewer = create_viewer(
+                        state,
+                        [weak_ws](const json& signal) {
+                            if (auto w = weak_ws.lock(); w && w->isOpen())
+                                w->send(json{{"type", "signal"}, {"data", signal}}.dump());
+                        },
+                        state.room_ice, true, is_admin);
+                }
+                else if (kind == "answer" && state.room_viewer)
+                {
+                    apply_answer(*state.room_viewer, data);
+                }
+            }
+            else if (type == "youtube")
+            {
+                state.youtube_wanted = msg.value("on", false);
+                std::printf("[sala] YouTube %s.\n", state.youtube_wanted ? "encendido" : "apagado");
+            }
+        }
+
+        // Abre la conexión con la sala. El token va como subprotocolo porque libdatachannel no
+        // permite cabeceras propias.
+        void connect_room(ServerState& state, const std::string& url, const std::string& token)
+        {
+            rtc::WebSocket::Configuration config;
+            config.protocols = {"ps4-agent", token};
+            config.pingInterval = std::chrono::seconds(20);
+            auto ws = std::make_shared<rtc::WebSocket>(config);
+            ws->onOpen([&state]() {
+                std::printf("[sala] Conectado a la sala.\n");
+                send_room(state, json{{"type", "status"}, {"ps4", state.ps4_connected.load()}});
+            });
+            ws->onMessage([&state](rtc::message_variant data) {
+                if (std::holds_alternative<std::string>(data))
+                    on_room_message(state, std::get<std::string>(data));
+            });
+            ws->onError([](const std::string& error) { std::printf("[sala] Error: %s\n", error.c_str()); });
+            ws->onClosed([&state]() {
+                std::printf("[sala] Desconectado de la sala.\n");
+                std::lock_guard<std::mutex> lock(state.room_mutex);
+                // Sin sala no hay turno: soltamos al jugador (la sala nos lo vuelve a decir al volver).
+                drop_room_viewer_locked(state);
+                state.room_player = json();
+            });
+            {
+                std::lock_guard<std::mutex> lock(state.room_mutex);
+                state.room_ws = ws;
+            }
+            ws->open(url);
+        }
+
+        // Enciende o apaga YouTube según lo pedido (desde --youtube o desde la sala).
+        void apply_youtube(ServerState& state)
+        {
+            const bool wanted = state.youtube_wanted;
+            auto current = state.youtube.load();
+            if (wanted && !current)
+            {
+                const auto& s = state.youtube_settings;
+                auto streamer = std::make_shared<YoutubeStreamer>(s.output, s.display, s.ffmpeg, s.encoder);
+                streamer->start();
+                state.youtube.store(streamer);
+            }
+            else if (!wanted && current)
+            {
+                state.youtube.store(nullptr);
+                current->stop();
+            }
+        }
+
+        // Hilo de mantenimiento: enciende/apaga YouTube y mantiene viva la conexión con la sala.
+        void housekeeping(ServerState& state, std::string room_url, std::string room_token)
+        {
+            auto next_room_attempt = std::chrono::steady_clock::now();
+            int room_failures = 0;
+            while (!g_stop)
+            {
+                apply_youtube(state);
+                if (!room_url.empty())
+                {
+                    bool open = false;
+                    {
+                        std::lock_guard<std::mutex> lock(state.room_mutex);
+                        open = state.room_ws && !state.room_ws->isClosed();
+                    }
+                    const auto now = std::chrono::steady_clock::now();
+                    if (open)
+                        room_failures = 0;
+                    else if (now >= next_room_attempt)
+                    {
+                        connect_room(state, room_url, room_token);
+                        // Reintentos: 2, 4, 8, 16, 30 s.
+                        next_room_attempt = now + std::chrono::seconds((std::min)(30, 2 << (std::min)(room_failures++, 4)));
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            }
         }
 
         // chiaki: un fotograma de video completo (H.264 Annex B). Se reenvía a todos los navegadores.
@@ -425,9 +715,9 @@ namespace agent
                 state->idr_frames++;
 
             // Copia para YouTube (ffmpeg la recodifica aparte; el jugador recibe el original).
-            if (state->youtube)
-                state->youtube->push_video(buf, buf_size, has_idr, state->sps.data(), state->sps.size(),
-                                           state->pps.data(), state->pps.size());
+            if (auto youtube = state->youtube.load())
+                youtube->push_video(buf, buf_size, has_idr, state->sps.data(), state->sps.size(),
+                                    state->pps.data(), state->pps.size());
 
             // Fotograma para el empaquetador: si es IDR y no trae SPS/PPS, se los anteponemos.
             rtc::binary frame;
@@ -469,8 +759,8 @@ namespace agent
         void on_audio_frame(uint8_t* buf, size_t buf_size, void* user)
         {
             auto* state = static_cast<ServerState*>(user);
-            if (state->youtube)
-                state->youtube->push_audio(buf, buf_size);
+            if (auto youtube = state->youtube.load())
+                youtube->push_audio(buf, buf_size);
             // Mismo reloj que el video: así el navegador puede sincronizar audio e imagen.
             const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state->start).count();
             const rtc::binary frame(reinterpret_cast<const std::byte*>(buf), reinterpret_cast<const std::byte*>(buf) + buf_size);
@@ -524,12 +814,14 @@ namespace agent
             {
                 std::printf("[ps4] Conectado. Transmitiendo.\n");
                 state->ps4_connected = true;
+                send_room(*state, json{{"type", "status"}, {"ps4", true}});
             }
             else if (event->type == CHIAKI_EVENT_QUIT)
             {
                 std::printf("[ps4] Sesion terminada: %s\n", chiaki_quit_reason_string(event->quit.reason));
                 state->ps4_connected = false;
                 state->session_ended = true;
+                send_room(*state, json{{"type", "status"}, {"ps4", false}});
             }
         }
 
@@ -607,7 +899,7 @@ namespace agent
                 }
 
                 // ffmpeg acaba de (re)conectarse y necesita un fotograma completo para empezar.
-                if (state.youtube && state.youtube->wants_keyframe())
+                if (auto youtube = state.youtube.load(); youtube && youtube->wants_keyframe())
                     request_keyframe(state);
 
                 size_t viewers = 0;
@@ -615,7 +907,7 @@ namespace agent
                     std::lock_guard<std::mutex> lock(state.mutex);
                     viewers = state.viewers.size();
                 }
-                if (viewers > 0 || state.youtube)
+                if (viewers > 0 || state.youtube.load())
                     last_viewer_seen = now;
                 else if (now - last_viewer_seen > kIdleSessionTimeout)
                 {
@@ -647,7 +939,7 @@ namespace agent
         }
     }
 
-    int cmd_serve(uint16_t port, bool youtube)
+    int cmd_serve(uint16_t port, bool youtube, bool room)
     {
         SessionConfig config;
         if (!load_session_config(config))
@@ -661,28 +953,42 @@ namespace agent
 
         ServerState state;
 
-        // 0. YouTube (solo con --youtube). Sin YOUTUBE_STREAM_KEY en .env se graba un archivo de
-        //    prueba en vez de salir en vivo. La clave nunca se muestra en pantalla.
-        if (youtube)
+        const EnvMap env = load_env();
+
+        // 0. YouTube: se enciende con --youtube o desde la sala. Sin YOUTUBE_STREAM_KEY en .env se
+        //    graba un archivo de prueba en vez de salir en vivo. La clave nunca se muestra en pantalla.
         {
-            const EnvMap env = load_env();
+            auto& s = state.youtube_settings;
             const std::string key = env_get(env, "YOUTUBE_STREAM_KEY");
-            const std::string ffmpeg = env_get(env, "FFMPEG_PATH", "ffmpeg");
-            const std::string encoder = env_get(env, "YOUTUBE_ENCODER", "auto");
-            std::string output, display;
+            s.ffmpeg = env_get(env, "FFMPEG_PATH", "ffmpeg");
+            s.encoder = env_get(env, "YOUTUBE_ENCODER", "auto");
             if (!key.empty())
             {
-                output = "rtmps://a.rtmps.youtube.com:443/live2/" + key;
-                display = "YouTube Live (rtmps://a.rtmps.youtube.com/live2/****)";
+                s.output = "rtmps://a.rtmps.youtube.com:443/live2/" + key;
+                s.display = "YouTube Live (rtmps://a.rtmps.youtube.com/live2/****)";
             }
             else
             {
-                output = env_get(env, "YOUTUBE_TEST_FILE", "youtube-test.mkv");
-                display = "archivo de prueba " + output + " (no hay YOUTUBE_STREAM_KEY en .env)";
+                s.output = env_get(env, "YOUTUBE_TEST_FILE", "youtube-test.mkv");
+                s.display = "archivo de prueba " + s.output + " (no hay YOUTUBE_STREAM_KEY en .env)";
             }
-            state.youtube = std::make_unique<YoutubeStreamer>(output, display, ffmpeg, encoder);
-            state.youtube->start();
+            state.youtube_wanted = youtube;
         }
+
+        // Sala de Cloudflare (solo con --room).
+        std::string room_url, room_token;
+        if (room)
+        {
+            room_url = env_get(env, "ROOM_URL");
+            room_token = env_get(env, "AGENT_TOKEN");
+            if (room_url.empty() || room_token.empty())
+            {
+                std::printf("Para --room faltan ROOM_URL y/o AGENT_TOKEN en .env\n");
+                return 1;
+            }
+            std::printf("[sala] Conectando a %s\n", room_url.c_str());
+        }
+        std::thread keeper([&state, room_url, room_token]() { housekeeping(state, room_url, room_token); });
 
         // 1. Servidor WebSocket de señalización (solo en esta máquina).
         rtc::WebSocketServer::Configuration ws_config;
@@ -691,7 +997,7 @@ namespace agent
         auto server = std::make_unique<rtc::WebSocketServer>(ws_config);
         server->onClient([&state](std::shared_ptr<rtc::WebSocket> ws) {
             std::printf("[web] Navegador conectado.\n");
-            ws->onOpen([&state, ws]() { add_viewer(state, ws); });
+            ws->onOpen([&state, ws]() { add_local_viewer(state, ws); });
         });
         std::printf("[web] Esperando navegadores en ws://localhost:%u\n", static_cast<unsigned>(port));
         std::printf("      Abre http://localhost:3000/local-player  (Ctrl+C para salir)\n");
@@ -737,8 +1043,15 @@ namespace agent
 
         // 3. Cierre ordenado de la parte web.
         std::printf("Cerrando...\n");
-        if (state.youtube)
-            state.youtube->stop();
+        keeper.join(); // termina porque g_stop ya es true
+        if (auto yt = state.youtube.exchange(nullptr))
+            yt->stop();
+        {
+            std::lock_guard<std::mutex> lock(state.room_mutex);
+            if (state.room_ws)
+                state.room_ws->close();
+            state.room_viewer.reset();
+        }
         server->stop();
         {
             std::lock_guard<std::mutex> lock(state.mutex);

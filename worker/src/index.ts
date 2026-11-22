@@ -46,9 +46,22 @@ function safeEqual(a: string, b: string): boolean {
   return diff === 0
 }
 
+// El agente se identifica con el token en "Authorization: Bearer <token>" o, como su librería de
+// WebSocket no permite cabeceras propias, como subprotocolo: "Sec-WebSocket-Protocol: ps4-agent, <token>".
+// (Sin "export": Cloudflare trata cada export del archivo principal como handler o clase.)
+const AGENT_SUBPROTOCOL = 'ps4-agent'
+
+function agentToken(request: Request): string | null {
+  const auth = request.headers.get('Authorization') ?? ''
+  if (auth.startsWith('Bearer ')) return auth.slice(7)
+  const protocols = (request.headers.get('Sec-WebSocket-Protocol') ?? '').split(',').map((p) => p.trim())
+  if (protocols[0] === AGENT_SUBPROTOCOL && protocols[1]) return protocols[1]
+  return null
+}
+
 function isAgent(request: Request, env: Env): boolean {
-  const header = request.headers.get('Authorization') ?? ''
-  return Boolean(env.AGENT_TOKEN) && header.startsWith('Bearer ') && safeEqual(header.slice(7), env.AGENT_TOKEN ?? '')
+  const token = agentToken(request)
+  return Boolean(env.AGENT_TOKEN) && token !== null && safeEqual(token, env.AGENT_TOKEN ?? '')
 }
 
 async function requireUser(request: Request, env: Env, opts: { approved?: boolean; admin?: boolean } = {}) {
@@ -149,7 +162,9 @@ async function handle(request: Request, env: Env): Promise<Response> {
   if (path === '/api/agent/ws') {
     if (request.headers.get('Upgrade') !== 'websocket') return error(426, 'Se esperaba WebSocket')
     if (!isAgent(request, env)) return error(401, 'Token de agente inválido')
-    return toRoom(request, env, { 'X-Room-Role': 'agent' })
+    // Si pidió subprotocolo, la respuesta debe confirmarlo (si no, el cliente cierra la conexión).
+    const usedSubprotocol = (request.headers.get('Sec-WebSocket-Protocol') ?? '').startsWith(AGENT_SUBPROTOCOL)
+    return toRoom(request, env, { 'X-Room-Role': 'agent', ...(usedSubprotocol ? { 'X-Agent-Subprotocol': '1' } : {}) })
   }
   if (path === '/api/agent/turn' && method === 'GET') {
     if (!isAgent(request, env)) return error(401, 'Token de agente inválido')
