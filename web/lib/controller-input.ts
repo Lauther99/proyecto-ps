@@ -76,6 +76,7 @@ const KEY_STICKS: Record<string, [stick: 'l' | 'r', axis: 'x' | 'y', dir: 1 | -1
 
 const AXIS_MAX = 32767
 const DEADZONE = 0.12 // ignora el pequeño desvío de palancas gastadas
+const READ_EVERY_MS = 8 // lectura del mando (125 Hz), independiente de los fotogramas de la pantalla
 const SEND_EVERY_MS = 33 // ~30 veces por segundo, aunque no cambie nada (el agente suelta todo si dejamos de mandar)
 
 type PadState = { b: number; l2: number; r2: number; lx: number; ly: number; rx: number; ry: number }
@@ -148,7 +149,6 @@ export function startControllerInput(
   let lastSent = ''
   let lastSentAt = 0
   let lastSource: InputSource = ''
-  let frame = 0
 
   const isTyping = (target: EventTarget | null) =>
     target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
@@ -159,9 +159,11 @@ export function startControllerInput(
     if (isTyping(e.target) || !isMapped(e.code)) return
     e.preventDefault() // que las flechas, Tab o Backspace no muevan la página
     keys.add(e.code)
+    tick() // sin esperar a la próxima lectura
   }
   const onKeyUp = (e: KeyboardEvent) => {
     keys.delete(e.code)
+    tick()
   }
   const onBlur = () => keys.clear() // al cambiar de ventana, nada queda presionado
 
@@ -170,8 +172,8 @@ export function startControllerInput(
   window.addEventListener('blur', onBlur)
 
   const tick = () => {
-    frame = requestAnimationFrame(tick)
-    if (channel.readyState !== 'open') return
+    // Con la pestaña oculta el mando no se actualiza: no repetimos un estado viejo (el agente suelta todo).
+    if (channel.readyState !== 'open' || document.hidden) return
 
     const pad = readGamepad()
     const state = merge(pad?.state ?? null, readKeyboard(keys))
@@ -191,10 +193,10 @@ export function startControllerInput(
     seq += 1
     channel.send(JSON.stringify({ s: seq, ...state }))
   }
-  frame = requestAnimationFrame(tick)
+  const timer = window.setInterval(tick, READ_EVERY_MS)
 
   return () => {
-    cancelAnimationFrame(frame)
+    window.clearInterval(timer)
     window.removeEventListener('keydown', onKeyDown)
     window.removeEventListener('keyup', onKeyUp)
     window.removeEventListener('blur', onBlur)

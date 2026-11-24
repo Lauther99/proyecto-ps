@@ -6,6 +6,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
 
+  // Dominio propio: Cloudflare crea el registro DNS y el certificado al desplegar.
+  "routes": [{ "pattern": "juegagtavi.online", "custom_domain": true }],
+
   // Frontend: los archivos que exporta Next (web/out) los sirve este mismo Worker. Solo /api/*
   // pasa por el código; el resto (/, /admin, JS, CSS) se entrega directo como archivo, sin gastar
   // solicitudes del Worker. Se genera con "npm run build:web".
@@ -27,19 +30,19 @@
     {
       "binding": "DB",
       "database_name": "ps4-room",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "d801901e-d9c6-445c-9062-5fa4d84c822e",
       "migrations_dir": "migrations"
     }
   ],
 
   "vars": {
-    // Dirección del frontend (Next). Se usa para redirigir tras el login y para validar el Origin.
-    "APP_URL": "http://localhost:3000",
-    // Correos que entran ya aprobados y como admin (separados por coma).
-    "ADMIN_EMAILS": ""
+    // Dirección pública. En local, "npm run dev" y "npm run preview" la reemplazan.
+    // Se usa para redirigir tras el login y para validar el Origin.
+    "APP_URL": "https://juegagtavi.online"
   }
   // Secretos (en .dev.vars para local, "wrangler secret put" al desplegar):
   //   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET   credenciales OAuth de Google Cloud
+  //   ADMIN_EMAILS                             correos que entran como admin (separados por coma)
   //   AGENT_TOKEN                              clave compartida con el agente de la casa
   //   TURN_KEY_ID, TURN_KEY_API_TOKEN          Cloudflare Realtime TURN (opcional en local)
   //   DEV_LOGIN=true                           SOLO local: login sin Google para pruebas

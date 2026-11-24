@@ -6,10 +6,11 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { startControllerInput, type InputSource } from '@/lib/controller-input'
+import { applyLatencyMode, loadLatencyMode, saveLatencyMode, type LatencyMode } from '@/lib/latency-mode'
 import type { Signaling } from '@/lib/signaling'
-import { startStreamStats, type StreamStats } from '@/lib/stream-stats'
+import { networkQuality, startDiagnostics, startStreamStats, type StreamStats } from '@/lib/stream-stats'
 
-type Status = 'esperando oferta' | 'negociando' | 'reproduciendo' | 'desconectado' | 'error'
+type Status = 'esperando oferta' | 'negociando' | 'conectando' | 'reproduciendo' | 'desconectado' | 'error'
 
 type Props = {
   signaling: Signaling
@@ -18,20 +19,45 @@ type Props = {
   children?: React.ReactNode
 }
 
+// En datos móviles algunos servidores TURN no responden y reunir todos los candidatos tarda mucho.
+// Respondemos a los 3 s con lo que haya; si aún no hay ningún relé, esperamos hasta 8 s.
+const GATHER_SOFT_MS = 3000
+const GATHER_HARD_MS = 8000
+
 function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
-  if (pc.iceGatheringState === 'complete') return Promise.resolve()
   return new Promise((resolve) => {
-    const check = () => {
-      if (pc.iceGatheringState === 'complete') {
-        pc.removeEventListener('icegatheringstatechange', check)
-        resolve()
-      }
-    }
-    pc.addEventListener('icegatheringstatechange', check)
+    const started = performance.now()
+    const timer = window.setInterval(() => {
+      const elapsed = performance.now() - started
+      const hasRelay = pc.localDescription?.sdp.includes(' typ relay') ?? false
+      const done =
+        pc.iceGatheringState === 'complete' ||
+        pc.signalingState === 'closed' ||
+        (elapsed >= GATHER_SOFT_MS && hasRelay) ||
+        elapsed >= GATHER_HARD_MS
+      if (!done) return
+      window.clearInterval(timer)
+      resolve()
+    }, 50)
   })
 }
 
 const buttonClass = 'rounded-md bg-zinc-800 px-3 py-1.5 text-sm font-medium text-zinc-100 hover:bg-zinc-700'
+
+const QUALITY_DOT = { Buena: 'bg-emerald-400', Regular: 'bg-amber-400', Mala: 'bg-red-500' } as const
+
+// Ping siempre visible, también en pantalla completa. Es la red hasta el agente, no el retraso total.
+function PingBadge({ rttMs, lossPercent }: { rttMs: number; lossPercent: number }) {
+  const quality = networkQuality(rttMs, lossPercent)
+  return (
+    <div className="pointer-events-none absolute right-2 top-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-1 text-xs text-zinc-100">
+      <span className={`size-2 rounded-full ${QUALITY_DOT[quality]}`} />
+      <span>
+        Ping <span className="font-mono font-semibold">{rttMs} ms</span> · {quality}
+      </span>
+    </div>
+  )
+}
 
 export default function Ps4Player({ signaling, iceServers, children }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -41,6 +67,7 @@ export default function Ps4Player({ signaling, iceServers, children }: Props) {
   const [muted, setMuted] = useState(true)
   const [inputSource, setInputSource] = useState<InputSource>('ninguno')
   const [stats, setStats] = useState<StreamStats | null>(null)
+  const [diagnostics, setDiagnostics] = useState<string[]>([])
   const [showStats, setShowStats] = useState(true)
 
   // Pantalla completa del contenedor del video (Esc para salir, lo maneja el navegador).
@@ -56,6 +83,19 @@ export default function Ps4Player({ signaling, iceServers, children }: Props) {
     else void screenRef.current?.requestFullscreen()
   }
 
+  // Baja latencia o estable: se recuerda en este navegador y se puede cambiar mientras se juega.
+  // (En la página de desarrollo se prerenderiza sin localStorage: por eso suppressHydrationWarning.)
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>(loadLatencyMode)
+  const latencyModeRef = useRef(latencyMode)
+  const peerRef = useRef<RTCPeerConnection | null>(null)
+  const toggleLatencyMode = () => {
+    const next = latencyMode === 'baja' ? 'estable' : 'baja'
+    latencyModeRef.current = next
+    setLatencyMode(next)
+    saveLatencyMode(next)
+    if (peerRef.current) applyLatencyMode(peerRef.current, next)
+  }
+
   const toggleSound = () => {
     const video = videoRef.current
     if (!video) return
@@ -68,28 +108,32 @@ export default function Ps4Player({ signaling, iceServers, children }: Props) {
     let pc: RTCPeerConnection | null = null
     let stopInput: (() => void) | null = null
     let stopStats: (() => void) | null = null
+    let stopDiagnostics: (() => void) | null = null
 
     const closePeer = () => {
       stopStats?.()
       stopInput?.()
-      stopStats = stopInput = null
+      stopDiagnostics?.()
+      stopStats = stopInput = stopDiagnostics = null
+      setStats(null)
       pc?.close()
-      pc = null
+      pc = peerRef.current = null
     }
 
     // Cada oferta del agente (al entrar, o si el agente reinició la sesión) crea una conexión nueva.
     const newPeer = () => {
       closePeer()
       const peer = new RTCPeerConnection({ iceServers })
-      pc = peer
+      pc = peerRef.current = peer
+      stopDiagnostics = startDiagnostics(peer, setDiagnostics)
       // Solo en desarrollo: deja la conexión accesible desde la consola para depurar (window.pc).
       if (process.env.NODE_ENV !== 'production') (window as unknown as { pc?: RTCPeerConnection }).pc = peer
 
       peer.ontrack = (event) => {
+        applyLatencyMode(peer, latencyModeRef.current)
         const video = videoRef.current
         if (video && event.streams[0]) {
           video.srcObject = event.streams[0]
-          setStatus('reproduciendo')
           stopStats ??= startStreamStats(peer, video, setStats)
         }
       }
@@ -117,6 +161,7 @@ export default function Ps4Player({ signaling, iceServers, children }: Props) {
           await waitForIceGathering(peer)
           if (pc !== peer) return // llegó otra oferta mientras tanto
           session.send({ type: 'answer', sdp: peer.localDescription?.sdp })
+          setStatus((s) => (s === 'negociando' ? 'conectando' : s))
         } catch (err) {
           setStatus('error')
           setDetail(String(err))
@@ -146,10 +191,21 @@ export default function Ps4Player({ signaling, iceServers, children }: Props) {
           autoPlay
           playsInline
           muted
+          onPlaying={() => setStatus('reproduciendo')}
           className={fullscreen ? 'h-screen w-screen object-contain' : 'aspect-video w-full rounded-lg bg-black'}
         />
-        {showStats && stats && (
-          <div className="pointer-events-none absolute left-2 top-2 rounded bg-black/60 px-2 py-1 font-mono text-xs leading-5 text-zinc-100">
+        {showStats && status !== 'reproduciendo' && diagnostics.length > 0 && (
+          <div className="pointer-events-none absolute inset-x-2 top-2 rounded bg-black/60 px-2 py-1 font-mono text-xs leading-5 text-zinc-100">
+            {diagnostics.map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+          </div>
+        )}
+        {status === 'reproduciendo' && stats && stats.rttMs !== null && (
+          <PingBadge rttMs={stats.rttMs} lossPercent={stats.lossPercent} />
+        )}
+        {showStats && status === 'reproduciendo' && stats && (
+          <div className="pointer-events-none absolute left-2 top-10 max-w-[calc(100%-1rem)] rounded bg-black/60 px-2 py-1 font-mono text-xs leading-5 text-zinc-100">
             <div>
               {stats.width}×{stats.height} · {stats.mbps} Mbps
             </div>
@@ -157,11 +213,13 @@ export default function Ps4Player({ signaling, iceServers, children }: Props) {
               fps: llegan {stats.fpsReceived} · decodif. {stats.fpsDecoded} · mostrados {stats.fpsShown}
             </div>
             <div className={stats.droppedPerSecond > 0 || stats.packetsLostPerSecond > 0 ? 'text-amber-300' : ''}>
-              descartados {stats.droppedPerSecond}/s · paquetes perdidos {stats.packetsLostPerSecond}/s · congelados{' '}
+              descartados {stats.droppedPerSecond}/s · paquetes perdidos {stats.packetsLostPerSecond}/s ({stats.lossPercent} %) · congelados{' '}
               {stats.freezes}
             </div>
             <div>
-              búfer {stats.bufferMs} ms{stats.rttMs !== null && ` · red ida y vuelta ${stats.rttMs} ms`}
+              búfer {stats.bufferMs} ms · jitter {stats.jitterMs} ms
+              {stats.route && ` · ruta ${stats.route}`}
+              {stats.network && ` · ${stats.network}`}
             </div>
           </div>
         )}
@@ -178,6 +236,9 @@ export default function Ps4Player({ signaling, iceServers, children }: Props) {
           {children}
           <button type="button" onClick={() => setShowStats((v) => !v)} className={buttonClass}>
             {showStats ? 'Ocultar estadísticas' : 'Estadísticas'}
+          </button>
+          <button type="button" onClick={toggleLatencyMode} className={buttonClass} suppressHydrationWarning>
+            {latencyMode === 'baja' ? 'Modo: Baja latencia' : 'Modo: Estable'}
           </button>
           <button type="button" onClick={toggleFullscreen} className={buttonClass}>
             Pantalla completa

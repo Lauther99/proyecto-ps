@@ -5,9 +5,9 @@ vez por turnos, los demás miran el directo de YouTube. Para el dueño (admin), 
 Perú) y algunos testers de otros países. El Remote Play está vinculado a una cuenta PSN
 **secundaria sin métodos de pago**.
 
-Dominio elegido: `ps5.lautherplays.com` (todavía no desplegado).
+Dominio elegido: `juegagtavi.online` (desplegado el 2026-11-22).
 
-## Estado actual (2026-11-22)
+## Estado actual (2026-11-23)
 
 **Funciona en local, probado de punta a punta:**
 
@@ -25,8 +25,11 @@ Dominio elegido: `ps5.lautherplays.com` (todavía no desplegado).
 - Red: laptop y PS4 por cable al router Movistar. 0 pérdidas de red en una sesión de ~5 min (en el
   router Nexxt anterior había ~3 por minuto).
 
-**No hecho todavía:** desplegar en Cloudflare (ver "Despliegue pendiente"), probar desde una red
-externa, clave de YouTube en vivo, soporte de PS5.
+**Funciona en producción (2026-11-23):** login con Google, agente por `wss` y video en un Android con
+datos móviles (5G). Se veía negro (`WebRTC: connecting`) hasta limitar la espera de candidatos ICE en
+`web/components/ps4-player.tsx` (3 s con relé, 8 s máximo): no quitar ese límite.
+
+**No hecho todavía:** probar controles y audio desde una red externa, clave de YouTube en vivo, soporte de PS5.
 
 ## Arquitectura
 
@@ -139,8 +142,11 @@ las reglas del firewall para `ps4-agent.exe` solo valen en redes privadas.
 
 ## Despliegue pendiente (en orden)
 
-1. **Dominio en Cloudflare.** Confirmar que `lautherplays.com` usa los DNS de Cloudflare en la cuenta
-   del usuario.
+Hechos: 1 a 5 y 7 a 9 (2026-11-22), y el video del 10 (2026-11-23). Pendientes: 6 (opcional), publicar
+la app de Google (9), activar "Always Use HTTPS" en Cloudflare y jugar con mando desde afuera (10).
+
+1. **Dominio en Cloudflare.** `juegagtavi.online` registrado en Cloudflare y con sus DNS (verificado el
+   2026-11-22). Está en la cuenta personal del usuario.
 2. **Claves de TURN.** En el panel de Cloudflare: Realtime → TURN → crear una clave. Da
    `TURN_KEY_ID` y `TURN_KEY_API_TOKEN`. Probarlas en local poniéndolas en `worker/.dev.vars`.
 3. **Base D1 real.**
@@ -151,8 +157,8 @@ las reglas del firewall para `ps4-agent.exe` solo valen en redes privadas.
    Reemplazar `database_id` en `worker/wrangler.jsonc` por el que devuelve, y aplicar el esquema:
    `npm run db:migrate:remote`.
 4. **Configuración de producción en `worker/wrangler.jsonc`.**
-   - `vars.APP_URL` = `https://ps5.lautherplays.com`
-   - Dominio propio: `"routes": [{ "pattern": "ps5.lautherplays.com", "custom_domain": true }]`
+   - `vars.APP_URL` = `https://juegagtavi.online`
+   - Dominio propio: `"routes": [{ "pattern": "juegagtavi.online", "custom_domain": true }]`
    - `ADMIN_EMAILS` mejor como secreto (paso 5) para no subir el correo a git.
 5. **Secretos** (cada uno pide el valor; nunca en el chat ni en git):
    ```powershell
@@ -169,9 +175,10 @@ las reglas del firewall para `ps4-agent.exe` solo valen en redes privadas.
    compilar el frontend: `NEXT_PUBLIC_YOUTUBE_CHANNEL_ID` en `web/.env.production` (o como variable al
    correr el build).
 7. **Desplegar:** `npm run deploy` en `worker/` (exporta `web/` y sube el Worker con los archivos).
-8. **Agente apuntando a producción:** en `agent/.env`, `ROOM_URL=wss://ps5.lautherplays.com/api/agent/ws`
+8. **Agente apuntando a producción:** en `agent/.env`, `ROOM_URL=wss://juegagtavi.online/api/agent/ws`
    y `AGENT_TOKEN` igual al secreto del paso 5. Correr `serve --room`.
-9. **Google en producción:** el cliente OAuth ya tiene las direcciones de `ps5.lautherplays.com`.
+9. **Google en producción:** agregar `juegagtavi.online` al cliente OAuth (origen y redirección
+   `/api/auth/google/callback`); tenía las del dominio descartado.
    Mientras esté en modo prueba solo entran los "usuarios de prueba" (máx. 100). Para abrirlo hay que
    publicar la app; Google pide página de inicio y política de privacidad en el dominio.
 10. **Prueba de fuego:** el celular con datos móviles (Wi-Fi apagado) entrando a la sala y jugando.
