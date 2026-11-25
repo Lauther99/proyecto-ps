@@ -38,3 +38,8 @@ CMakeUserPresets.json
 *.lib
 *.mkv
 .wrangler-*.log
+
+
+.mcp.json
+
+design
