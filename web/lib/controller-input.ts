@@ -150,13 +150,17 @@ export function startControllerInput(
   let lastSentAt = 0
   let lastSource: InputSource = ''
 
+  // Con un cuadro de diálogo abierto, el teclado es de la página y no del juego.
   const isTyping = (target: EventTarget | null) =>
-    target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+    (target instanceof HTMLInputElement && target.type !== 'range') ||
+    target instanceof HTMLTextAreaElement ||
+    document.querySelector('dialog[open]') !== null
 
   const isMapped = (code: string) => code in KEY_BUTTONS || code in KEY_TRIGGERS || code in KEY_STICKS
 
   const onKeyDown = (e: KeyboardEvent) => {
-    if (isTyping(e.target) || !isMapped(e.code)) return
+    if (isTyping(e.target)) return keys.clear()
+    if (!isMapped(e.code)) return
     e.preventDefault() // que las flechas, Tab o Backspace no muevan la página
     keys.add(e.code)
     tick() // sin esperar a la próxima lectura

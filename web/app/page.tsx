@@ -1,9 +1,5 @@
-import RoomApp from '@/components/room/room-app'
+import Pantalla from "@/components/pantallas/inicio";
 
-export default function Home() {
-  return (
-    <main className="flex min-h-screen flex-col bg-zinc-950 text-zinc-100">
-      <RoomApp />
-    </main>
-  )
+export default function Page() {
+  return <Pantalla />;
 }

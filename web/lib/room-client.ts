@@ -1,31 +1,38 @@
 // Conexión WebSocket con la sala (Durable Object). Se reconecta sola si se corta y avisa de cada
-// mensaje a quien esté escuchando. El protocolo está documentado en worker/src/room.ts.
+// mensaje a quien esté escuchando. La conexión es pública: un visitante recibe el estado, y solo el
+// jugador actual puede intercambiar señales WebRTC. Contrato en web/API.md.
 
-export type Member = { userId: string; name: string }
+export type QueueMember = { userId: string; name: string; minutes: number }
 
 export type RoomState = {
-  queue: Member[]
-  current: (Member & { isAdmin: boolean; startedAt: number; endsAt: number | null }) | null
-  offer: (Member & { expiresAt: number }) | null
+  queue: QueueMember[]
+  current: { userId: string; name: string; isAdmin: boolean; startedAt: number; endsAt: number | null } | null
+  offer: (QueueMember & { expiresAt: number }) | null
   paused: boolean
-  turnMinutes: number
   youtube: boolean
-  ps4Connected: boolean
   agentOnline: boolean
+  // La sesión con la consola es bajo demanda: ps4Connected es false también cuando nadie juega. No
+  // sirve para saber si está apagada; para eso está consoleOff.
+  ps4Connected: boolean
+  consoleOff?: boolean
   now: number // reloj del servidor al enviar el estado
 }
 
-export type Me = { userId: string; name: string; isAdmin: boolean }
-
 export type RoomMessage =
-  | { type: 'hello'; me: Me }
   | { type: 'state'; state: RoomState }
+  | { type: 'me' } // cambió mi saldo, mi aviso o mi cuenta: volver a pedir /api/me
   | { type: 'signal'; data: unknown }
   | { type: 'error'; message: string }
 
-export type AdminAction = 'skip' | 'take' | 'release' | 'pause' | 'resume' | 'turnMinutes' | 'youtube'
-
 type Listener = (message: RoomMessage) => void
+
+export interface Room {
+  connect(): void
+  close(): void
+  send(message: object): void
+  onMessage(listener: Listener): () => void
+  onStatus(listener: (connected: boolean) => void): () => void
+}
 
 // En desarrollo, Next corre en :3000 y el backend en :8787. El WebSocket va directo al backend
 // (las cookies de localhost se comparten entre puertos). En producción, mismo dominio.
@@ -35,39 +42,39 @@ function roomUrl(): string {
   return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}/api/room/ws`
 }
 
-export class RoomClient {
+export class RoomClient implements Room {
   private ws: WebSocket | null = null
   private listeners = new Set<Listener>()
   private statusListeners = new Set<(connected: boolean) => void>()
   private retry = 0
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
-  private closed = false
-  connected = false
 
   connect() {
-    this.closed = false
+    this.close()
     const ws = new WebSocket(roomUrl())
     this.ws = ws
     ws.onopen = () => {
+      if (this.ws !== ws) return
       this.retry = 0
       this.setConnected(true)
       // "ping" lo responde Cloudflare sin despertar a la sala; mantiene viva la conexión.
       this.pingTimer = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send('ping'), 25_000)
     }
     ws.onmessage = (event) => {
-      if (event.data === 'pong') return
+      if (this.ws !== ws || event.data === 'pong') return
+      let message: RoomMessage
       try {
-        const message = JSON.parse(event.data as string) as RoomMessage
-        for (const listener of this.listeners) listener(message)
+        message = JSON.parse(event.data as string) as RoomMessage
       } catch {
-        // mensaje inválido: lo ignoramos
+        return // mensaje inválido: lo ignoramos
       }
+      for (const listener of this.listeners) listener(message)
     }
     ws.onclose = () => {
+      if (this.ws !== ws) return
       if (this.pingTimer) clearInterval(this.pingTimer)
       this.setConnected(false)
-      if (this.closed) return
       // Reintento con espera creciente: 1, 2, 4, 8, 10 s...
       const delay = Math.min(10_000, 1000 * 2 ** this.retry++)
       this.retryTimer = setTimeout(() => this.connect(), delay)
@@ -75,18 +82,15 @@ export class RoomClient {
   }
 
   close() {
-    this.closed = true
     if (this.retryTimer) clearTimeout(this.retryTimer)
     if (this.pingTimer) clearInterval(this.pingTimer)
-    this.ws?.close()
+    const ws = this.ws
+    this.ws = null
+    ws?.close()
   }
 
   send(message: object) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(message))
-  }
-
-  admin(action: AdminAction, value?: unknown) {
-    this.send({ type: 'admin', action, value })
   }
 
   onMessage(listener: Listener): () => void {
@@ -100,7 +104,6 @@ export class RoomClient {
   }
 
   private setConnected(value: boolean) {
-    this.connected = value
     for (const listener of this.statusListeners) listener(value)
   }
 }

@@ -4,7 +4,7 @@
 // Mensajes: agente -> navegador {type:"offer", sdp}; navegador -> agente {type:"answer", sdp}
 // y {type:"ready"} para pedir una oferta nueva (al entrar o al recargar la página).
 
-import type { RoomClient } from './room-client'
+import type { Room } from './room-client'
 
 export type SignalMessage = { type: 'offer' | 'answer' | 'ready'; sdp?: string }
 
@@ -36,7 +36,7 @@ export function localSignaling(url: string): Signaling {
   }
 }
 
-export function roomSignaling(client: RoomClient): Signaling {
+export function roomSignaling(client: Room): Signaling {
   return ({ onSignal }) => {
     const off = client.onMessage((message) => {
       if (message.type === 'signal') onSignal(message.data as SignalMessage)

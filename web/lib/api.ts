@@ -1,61 +1,147 @@
-// Llamadas HTTP al backend (worker/). Todas van a /api/* del mismo dominio.
+// Llamadas HTTP al backend. Todas van a /api/* del mismo dominio.
+// Los tipos de este archivo son el contrato que el backend (etapas 3 y 4) debe cumplir. Ver web/API.md.
 
 export type UserStatus = 'pending' | 'approved' | 'blocked'
 export type UserRole = 'player' | 'admin'
+
+// Aviso personal: queda visible hasta que el usuario lo cierra o vuelve a la cola.
+export type Notice =
+  | { kind: 'expired' }
+  | { kind: 'interrupted'; refundedCredits: number; unplayedMinutes: number }
 
 export type User = {
   id: string
   email: string
   name: string
+  nickname: string
   picture: string | null
   status: UserStatus
+  blockedReason: string | null
   role: UserRole
+  balance: { available: number; reserved: number }
+  notice: Notice | null
 }
 
-export type AdminUser = User & { created_at: number; last_seen_at: number | null; played_ms: number }
+export type GameStatus = 'available' | 'soon' | 'unavailable'
+export type Game = { id: string; name: string; genre: string; players: number; status: GameStatus; art?: string[] }
+
+export type SiteConfig = {
+  blockMinutes: number
+  blockCredits: number
+  maxMinutes: number
+  acceptSeconds: number
+  yapeHolder: string
+  yapeNumber: string
+  yapeQrUrl: string | null
+  youtubeChannelId: string | null
+}
+
+export type RoomInfo = { id: string; name: string; console: string; game: string }
+export type Site = { config: SiteConfig; rooms: RoomInfo[]; games: Game[] }
+
+export type RechargeStatus = 'pending' | 'approved' | 'rejected'
+export type Recharge = { id: string; amount: number; operation: string; createdAt: number; status: RechargeStatus; reason: string | null }
+export type Movement = { id: string; createdAt: number; detail: string; credits: number }
+export type SessionResult = 'complete' | 'left' | 'interrupted' | 'skipped'
+export type PlaySession = {
+  id: string
+  startedAt: number
+  game: string
+  playedMs: number
+  chargedCredits: number
+  refundedCredits: number
+  result: SessionResult
+}
+
+export type AdminUser = Pick<User, 'id' | 'email' | 'nickname' | 'status' | 'role'> & { available: number }
+export type AdminRecharge = Recharge & { nickname: string; repeated: boolean }
+export type AdminSession = PlaySession & { nickname: string }
+export type AdminSummary = {
+  agentLastSeen: number | null
+  pendingRecharges: number
+  repeatedRecharges: number
+  income: { period: 'today' | 'week' | 'month'; recharges: number; soles: number; playedMs: number }[]
+}
+export type RoomAction =
+  | { action: 'take' | 'release' | 'pause' | 'resume' }
+  | { action: 'skip'; reason: string }
+  | { action: 'reorder'; userIds: string[] }
+  | { action: 'refund'; minutes: number; reason: string }
+  | { action: 'youtube'; on: boolean }
 
 export type IceServer = { urls: string | string[]; username?: string; credential?: string }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, { credentials: 'same-origin', ...init })
+export class ApiError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
+// Modo demo: backend simulado en el navegador, solo en desarrollo (npm run dev:demo).
+export const DEMO = process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_DEMO === '1'
+
+export async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  if (process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_DEMO === '1') {
+    const { demo } = await import('./demo/backend')
+    return (await demo.handle(path, method, body)) as T
+  }
+  let res: Response
+  try {
+    res = await fetch(path, {
+      method,
+      cache: 'no-store',
+      credentials: 'same-origin',
+      ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    })
+  } catch {
+    throw new ApiError('No pudimos conectarnos. Revisa tu internet e intenta otra vez.', 0)
+  }
   if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null
-    throw new Error(body?.error ?? `Error ${res.status}`)
+    const data = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(data?.error ?? `No se pudo completar (error ${res.status}).`, res.status)
   }
   return (res.status === 204 ? null : await res.json()) as T
 }
 
-// Sesión actual. 'user' es null si no hay sesión; 'devLogin' indica si el login de pruebas está activo.
+const post = <T = null>(path: string, body: unknown = {}) => request<T>(path, 'POST', body)
+
+// --- sitio y sesión ---
+export const fetchSite = () => request<Site>('/api/site')
+
+// 'user' es null si no hay sesión; 'devLogin' indica si el login de pruebas (solo local) está activo.
 export async function fetchMe(): Promise<{ user: User | null; devLogin: boolean }> {
-  const res = await fetch('/api/me', { credentials: 'same-origin' })
+  if (DEMO) return request('/api/me')
+  const res = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store' })
   if (res.status === 401 || res.ok) return res.json()
-  throw new Error(`No se pudo consultar la sesión (${res.status})`)
+  throw new ApiError(`No se pudo consultar la sesión (${res.status})`, res.status)
 }
+export const loginUrl = (next: string) => `/api/auth/google/login?next=${encodeURIComponent(next)}`
+export const devLogin = (email: string, name: string) => post('/api/auth/dev-login', { email, name })
+export const logout = () => post('/api/auth/logout')
+export const updateNickname = (nickname: string) => post('/api/me', { nickname })
+export const dismissNotice = () => post('/api/me/notice/dismiss')
 
-export function devLogin(email: string, name: string) {
-  return request<User>('/api/auth/dev-login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, name }),
-  })
-}
+// --- cola y turno ---
+export const joinQueue = (minutes: number) => post('/api/queue/join', { minutes })
+export const leaveQueue = () => post('/api/queue/leave')
+export const acceptTurn = () => post('/api/turn/accept')
+export const declineTurn = () => post('/api/turn/decline')
+export const endTurn = () => post('/api/turn/end')
+export const fetchIceServers = async () => (await request<{ iceServers: IceServer[] }>('/api/turn')).iceServers
 
-export function logout() {
-  return request<null>('/api/auth/logout', { method: 'POST' })
-}
+// --- créditos e historial ---
+export const createRecharge = (amount: number, operation: string, key: string) =>
+  post<{ recharge: Recharge }>('/api/recharges', { amount, operation, key })
+export const rateSession = (id: string, score: number, problems: string[]) => post(`/api/sessions/${id}/rating`, { score, problems })
 
-export async function fetchIceServers(): Promise<IceServer[]> {
-  return (await request<{ iceServers: IceServer[] }>('/api/turn')).iceServers
-}
-
-export async function fetchUsers(): Promise<AdminUser[]> {
-  return (await request<{ users: AdminUser[] }>('/api/admin/users')).users
-}
-
-export function updateUser(id: string, change: { status?: UserStatus; role?: UserRole }) {
-  return request<{ user: User }>(`/api/admin/users/${id}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(change),
-  })
-}
+// --- admin ---
+export const resolveRecharge = (id: string, change: { status: 'approved' } | { status: 'rejected'; reason: string }) =>
+  post(`/api/admin/recharges/${id}`, change)
+export const updateUser = (id: string, change: { status: 'approved' | 'blocked'; reason: string } | { role: UserRole }) =>
+  post(`/api/admin/users/${id}`, change)
+export const adjustBalance = (id: string, delta: number, reason: string) => post(`/api/admin/users/${id}/balance`, { delta, reason })
+export const roomAction = (action: RoomAction) => post('/api/admin/room', action)
+export const updateGame = (id: string, status: GameStatus) => post(`/api/admin/games/${id}`, { status })
+export const updateConfig = (config: Omit<SiteConfig, 'yapeQrUrl'>) => post('/api/admin/config', config)

@@ -11,6 +11,10 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    // Interfaz anterior, sin uso: pendiente de borrar.
+    "components/room/**",
+    "components/admin/**",
+    "lib/use-room.ts",
     "next-env.d.ts",
   ]),
 ]);
