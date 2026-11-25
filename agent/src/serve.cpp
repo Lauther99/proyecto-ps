@@ -116,6 +116,9 @@ namespace agent
             std::mutex room_mutex;
             std::shared_ptr<rtc::WebSocket> room_ws;
             std::shared_ptr<Viewer> room_viewer;       // conexión WebRTC con el jugador del turno
+            // La consola fallo mientras alguien la necesitaba (no: el jugador cerro su pestaña).
+            std::atomic<bool> fault{false};
+            std::atomic<bool> idle_close{false}; // la sesion se cerro por falta de navegadores
             json room_player;                          // {userId,name,isAdmin} o null
             std::vector<rtc::IceServer> room_ice;      // servidores TURN que manda la sala
             // Protege 'session' (cambia en cada reconexión) y todo lo que se le envía a la PS4.
@@ -628,7 +631,7 @@ namespace agent
             auto ws = std::make_shared<rtc::WebSocket>(config);
             ws->onOpen([&state]() {
                 std::printf("[sala] Conectado a la sala.\n");
-                send_room(state, json{{"type", "status"}, {"ps4", state.ps4_connected.load()}});
+                send_room(state, json{{"type", "status"}, {"ps4", state.ps4_connected.load()}, {"fault", state.fault.load()}});
             });
             ws->onMessage([&state](rtc::message_variant data) {
                 if (std::holds_alternative<std::string>(data))
@@ -814,7 +817,8 @@ namespace agent
             {
                 std::printf("[ps4] Conectado. Transmitiendo.\n");
                 state->ps4_connected = true;
-                send_room(*state, json{{"type", "status"}, {"ps4", true}});
+                state->fault = false;
+                send_room(*state, json{{"type", "status"}, {"ps4", true}, {"fault", false}});
             }
             else if (event->type == CHIAKI_EVENT_QUIT)
             {
@@ -838,6 +842,7 @@ namespace agent
         bool run_session(ServerState& state, SessionConfig& config, ChiakiLog& log)
         {
             state.session_ended = false;
+            state.idle_close = false;
             state.ps4_connected = false;
             state.sps.clear(); // la nueva sesión trae su propio SPS/PPS al empezar
             state.pps.clear();
@@ -913,6 +918,7 @@ namespace agent
                 {
                     std::printf("[ps4] Nadie mirando hace %lld s: cerrando la sesion.\n",
                                 static_cast<long long>(kIdleSessionTimeout.count()));
+                    state.idle_close = true;
                     break;
                 }
 
@@ -1013,6 +1019,9 @@ namespace agent
             if (!session_wanted(state))
             {
                 std::printf("[ps4] Sin navegadores: la PS4 queda libre. Esperando...\n");
+                // Si el jugador se fue durante una falla, ya no es nuestra: la sala sigue contando su tiempo.
+                if (state.fault.exchange(false))
+                    send_room(state, json{{"type", "status"}, {"ps4", false}, {"fault", false}});
                 while (!g_stop && !session_wanted(state))
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 failures = 0;
@@ -1024,6 +1033,13 @@ namespace agent
                 break;
             if (!session_wanted(state))
                 continue; // se cerró por falta de navegadores, no por error: no reintentamos
+
+            // Falla real: alguien sigue conectado y la sesion se corto. La sala detiene el reloj del turno.
+            if (!state.idle_close)
+            {
+                state.fault = true;
+                send_room(state, json{{"type", "status"}, {"ps4", false}, {"fault", true}});
+            }
 
             failures = connected ? 0 : failures + 1;
             // (std::min) entre paréntesis: windows.h define una macro "min" que choca con std::min.
