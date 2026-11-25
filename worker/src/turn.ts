@@ -5,20 +5,26 @@
 import type { Env } from './env'
 
 const STUN_ONLY: RTCIceServerLike[] = [{ urls: 'stun:stun.cloudflare.com:3478' }]
-const TTL_SECONDS = 4 * 60 * 60 // un turno largo + margen
 
 export type RTCIceServerLike = { urls: string | string[]; username?: string; credential?: string }
 
-export async function getIceServers(env: Env): Promise<RTCIceServerLike[]> {
+export async function getIceServers(env: Env, ttlSeconds: number): Promise<RTCIceServerLike[]> {
   if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN) return STUN_ONLY
-  const response = await fetch(
+  let response: Response
+  try {
+    response = await fetch(
     `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
     {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ttl: TTL_SECONDS }),
+      body: JSON.stringify({ ttl: ttlSeconds }),
+      signal: AbortSignal.timeout(5000), // la sala no se queda esperando
     },
   )
+  } catch (e) {
+    console.error('TURN: sin respuesta', e)
+    return STUN_ONLY
+  }
   if (!response.ok) {
     console.error('TURN: no se pudieron generar credenciales', response.status)
     return STUN_ONLY

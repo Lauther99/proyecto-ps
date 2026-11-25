@@ -1,7 +1,8 @@
 # worker/ (backend de la sala)
 
-Cloudflare Worker + Durable Object `Room` + D1. Login con Google, aprobación de usuarios por el
-admin, cola de turnos y señalización WebRTC entre el navegador del jugador y el agente de la casa.
+Cloudflare Worker + Durable Object `Room` + D1. Login con Google, créditos y recargas por Yape, cola de
+turnos y señalización WebRTC entre el navegador del jugador y el agente de la casa.
+Diseño en `diseno/DISENO.md`; contrato con el frontend en `../web/API.md`.
 
 ## Desarrollo local (sin desplegar nada)
 
@@ -32,9 +33,9 @@ npm run deploy                     # exporta web/ y sube el Worker con los archi
 Pruebas:
 
 ```powershell
-npm test                           # reglas de la sala (vitest)
+npm test                           # reglas de la sala y SQL del dinero (vitest, Node 22 o más)
 npm run typecheck
-node scripts/smoke-local.mjs       # flujo completo contra "npm run dev" (requiere DEV_LOGIN=true)
+npm run smoke                      # flujo completo con su propio backend y base temporal (~2 min)
 ```
 
 ## Piezas
@@ -42,11 +43,14 @@ node scripts/smoke-local.mjs       # flujo completo contra "npm run dev" (requie
 | Archivo | Qué hace |
 |---|---|
 | `src/room-logic.ts` | Reglas de la cola y los turnos (funciones puras, probadas en `test/`) |
-| `src/room.ts` | Durable Object: WebSockets de navegadores y agente, alarmas, historial |
+| `src/store.ts` | SQL de la sala y del dinero |
+| `src/room.ts` | Durable Object: fila de operaciones, WebSockets de navegadores y agente, alarmas |
+| `src/player.ts`, `src/admin.ts` | Rutas del jugador y del admin |
+| `src/http.ts` | Permisos, lectura del cuerpo y errores |
 | `src/auth.ts` | Google OAuth + PKCE, sesiones (cookie), login de desarrollo solo en localhost |
 | `src/index.ts` | Rutas `/api/*` y controles de acceso |
 | `src/turn.ts` | Credenciales TURN de Cloudflare Realtime (STUN si no hay claves) |
 | `migrations/` | Esquema de D1 |
 
-Los mensajes de WebSocket están documentados al inicio de `src/room.ts` y las rutas al inicio de
-`src/index.ts`.
+Los mensajes de WebSocket están documentados al inicio de `src/room.ts` y las rutas en
+`../web/API.md`.

@@ -1,10 +1,15 @@
 import type { Room } from './room'
 
+export interface RateLimiter {
+  limit(options: { key: string }): Promise<{ success: boolean }>
+}
+
 export interface Env {
   ROOM: DurableObjectNamespace<Room>
   DB: D1Database
   APP_URL: string
-  ADMIN_EMAILS: string
+  LIMITER?: RateLimiter
+  ADMIN_EMAILS?: string
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
   AGENT_TOKEN?: string
@@ -20,7 +25,10 @@ export type User = {
   id: string
   email: string
   name: string
+  nickname: string
   picture: string | null
   status: UserStatus
+  blockedReason: string | null
   role: UserRole
+  notice: string | null // JSON
 }

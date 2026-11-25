@@ -1,4 +1,4 @@
-// Backend de la sala: login con Google, usuarios aprobados, cola de turnos y señalización
+// Backend: login con Google, créditos y recargas, cola de turnos y señalización
 // entre el navegador del jugador y el agente (que corre en la casa, detrás del CGNAT).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -24,7 +24,7 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
 
-  // Usuarios, sesiones e historial de turnos. Para desarrollo local el id puede ser cualquiera;
+  // Usuarios, sesiones, dinero, cola y turnos. Para desarrollo local el id puede ser cualquiera;
   // al desplegar se reemplaza por el de "wrangler d1 create ps4-room".
   "d1_databases": [
     {
@@ -34,6 +34,9 @@
       "migrations_dir": "migrations"
     }
   ],
+
+  // Freno de abusos: 10 intentos por minuto y por clave (login por IP; apodo y recargas por usuario).
+  "ratelimits": [{ "name": "LIMITER", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }],
 
   "vars": {
     // Dirección pública. En local, "npm run dev" y "npm run preview" la reemplazan.
