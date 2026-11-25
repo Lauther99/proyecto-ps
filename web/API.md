@@ -44,6 +44,7 @@ o `null`. Todas las POST validan `Origin`. Horas en ms desde 1970.
 | `/api/admin/users/:id/balance` | `{ delta, reason }`. Nunca deja saldo negativo |
 | `/api/admin/games/:id` | `{ status }` |
 | `/api/admin/config` | Precio, Yape y canal |
+| `/api/admin/rooms/:id` | `{ name, console, game }`: lo que se muestra de la sala. `game` puede ir vacío |
 | `/api/admin/room` | `RoomAction`: take, release, skip, pause, resume, reorder, refund, youtube |
 
 ## WebSocket
@@ -55,6 +56,7 @@ Navegador a sala: `{type:"signal", data}` y `"ping"`.
 - `state.queue`, `current` y `offer` llevan apodo, nunca correo. `minutes` es lo que jugará cada uno.
 - `current.endsAt` es `null` cuando el admin tomó el control. El jugador detenido vuelve primero a la cola
   con sus minutos restantes en `minutes`, sin pagar otra vez al aceptar.
+- El agente manda `{type:"status", ps4, fault}`; `fault` distingue una falla nuestra de que el jugador se fue.
 - `paused` sin jugador se muestra como "En mantenimiento".
 - `ps4Connected` no indica consola apagada (la sesión es bajo demanda). Para eso, `consoleOff: true`.
 - Los cobros y devoluciones deben decidirse en el servidor. El frontend solo los muestra.

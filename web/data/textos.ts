@@ -14,7 +14,7 @@ export const T = {
     corazon: (n: number) => `Quedan ${n} minutos`,
   },
   acceso: {
-    prueba: "Entrada de prueba (solo en tu equipo)", correo: "Correo", nombre: "Nombre", entrarPrueba: "Entrar para probar",
+    fallo: "No se pudo entrar con Google. Intenta otra vez.", prueba: "Entrada de prueba (solo en tu equipo)", correo: "Correo", nombre: "Nombre", entrarPrueba: "Entrar para probar",
     titulo: "Entra para jugar", texto: "Mirar es gratis y sin cuenta. Para hacer cola, recargar y jugar, entra con Google. Tu cuenta se crea al instante.",
     boton: "Continuar con Google", nota: "En la sala se ve tu apodo, nunca tu correo.", terminos: "Al continuar aceptas los", enlace: "términos",
   },

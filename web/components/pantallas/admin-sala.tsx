@@ -5,9 +5,10 @@ import { PaginaAdmin } from "@/components/pagina-admin";
 import { Turno } from "@/components/sala";
 import { Aviso, Boton, Campo, Enlace, Modal } from "@/components/ui";
 import { A } from "@/data/textos-admin";
-import { roomAction, type RoomAction } from "@/lib/api";
+import { roomAction, updateRoom, type RoomAction } from "@/lib/api";
 import { creditosDe } from "@/lib/config";
 import { useAccion } from "@/lib/datos";
+import { useSistema } from "@/lib/sistema";
 import { useVista } from "@/lib/vista";
 
 const t = A.sala;
@@ -15,6 +16,40 @@ type Accion = "tomar" | "saltar" | "devolver" | null;
 
 function Flecha({ abajo }: { abajo?: boolean }) {
   return <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={abajo ? "rotate-180" : ""}><path d="M12 20V4M5 11l7-7 7 7" /></svg>;
+}
+
+function Detalles() {
+  const { sitio, reintentar } = useSistema();
+  const sala = sitio.datos?.rooms[0];
+  const [guardado, setGuardado] = useState(false);
+  const [invalido, setInvalido] = useState(false);
+  const { ocupado, error, ejecutar } = useAccion();
+  if (!sala) return null;
+  const guardar = async (f: FormData) => {
+    const leer = (k: string) => String(f.get(k) ?? "").trim();
+    const datos = { name: leer("nombre"), console: leer("consola"), game: leer("juego") };
+    const ok = !!datos.name && !!datos.console;
+    setInvalido(!ok);
+    if (ok && (await ejecutar(() => updateRoom(sala.id, datos)))) {
+      setGuardado(true);
+      reintentar(); // vuelve a pedir los datos del sitio
+    }
+  };
+  return (
+    <section aria-labelledby="det" className="flex flex-col gap-4 border-t border-raised pt-6">
+      <div><h2 id="det" className="t-title">{t.detalles}</h2><p className="text-muted">{t.detallesTexto}</p></div>
+      <form noValidate className="flex flex-col gap-4" onChange={() => { setGuardado(false); setInvalido(false); }} onSubmit={(e) => { e.preventDefault(); void guardar(new FormData(e.currentTarget)); }}>
+        <div className="grid items-start gap-4 sm:grid-cols-3">
+          <Campo id="s-nom" name="nombre" maxLength={40} etiqueta={t.nombreSala} defaultValue={sala.name} />
+          <Campo id="s-con" name="consola" maxLength={30} etiqueta={t.consola} ayuda={t.consolaAyuda} defaultValue={sala.console} />
+          <Campo id="s-jue" name="juego" maxLength={60} etiqueta={t.juego} ayuda={t.juegoAyuda} defaultValue={sala.game} />
+        </div>
+        <Boton type="submit" className="self-start max-sm:w-full" disabled={ocupado}>{t.guardar}</Boton>
+        <ErrorAccion>{invalido ? t.detallesError : error}</ErrorAccion>
+        <p role="status" className="min-h-6 t-label">{guardado && t.guardado}</p>
+      </form>
+    </section>
+  );
 }
 
 function Contenido() {
@@ -83,6 +118,8 @@ function Contenido() {
           )}
         </section>
       </div>
+
+      <Detalles />
 
       <Modal abierto={accion === "tomar"} alCerrar={cerrar} titulo={t.tomarTitulo}>
         <p className="text-muted">{t.tomarTexto}</p>

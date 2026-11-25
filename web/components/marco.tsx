@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { T } from "@/data/textos";
 import { DEMO, acceptTurn, devLogin, loginUrl, request } from "@/lib/api";
 import { SITIO, espera, reloj } from "@/lib/config";
@@ -347,6 +347,14 @@ export function SinConexion() {
   );
 }
 
+const sinCambios = () => () => undefined;
+
+/** El login con Google no terminó: el backend vuelve con ?login_error=... */
+function ErrorLogin() {
+  const error = useSyncExternalStore(sinCambios, () => new URLSearchParams(window.location.search).has("login_error"), () => false);
+  return error && <p role="alert" className="flex items-center justify-center gap-2 bg-warn px-4 py-2 t-label text-ground"><Icono nombre="alerta" t={20} className="shrink-0" />{T.acceso.fallo}</p>;
+}
+
 /** Para pantallas con cuenta: si nadie entró, invita a hacerlo. */
 export function PedirCuenta() {
   return (
@@ -376,6 +384,7 @@ export function Pagina({
         {T.comun.saltar}
       </a>
       <SinConexion />
+      <ErrorLogin />
       <Cabecera />
       <main id="contenido" className={`${CONTENEDOR} flex-1 pb-16`}>
         <EstadoGeneral requiere={requiere}>{children}</EstadoGeneral>

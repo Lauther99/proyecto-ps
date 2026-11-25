@@ -142,6 +142,7 @@ export const resolveRecharge = (id: string, change: { status: 'approved' } | { s
 export const updateUser = (id: string, change: { status: 'approved' | 'blocked'; reason: string } | { role: UserRole }) =>
   post(`/api/admin/users/${id}`, change)
 export const adjustBalance = (id: string, delta: number, reason: string) => post(`/api/admin/users/${id}/balance`, { delta, reason })
+export const updateRoom = (id: string, room: Omit<RoomInfo, 'id'>) => post(`/api/admin/rooms/${id}`, room)
 export const roomAction = (action: RoomAction) => post('/api/admin/room', action)
 export const updateGame = (id: string, status: GameStatus) => post(`/api/admin/games/${id}`, { status })
 export const updateConfig = (config: Omit<SiteConfig, 'yapeQrUrl'>) => post('/api/admin/config', config)

@@ -45,6 +45,7 @@ class Demo {
   sessions: (PlaySession & { nickname: string })[] = []
   users: AdminUser[] = []
   games: Game[] = []
+  info = { id: 'sala-1', name: 'Sala 1', console: 'PS4', game: 'Partida libre' }
   config!: SiteConfig
 
   constructor() {
@@ -196,7 +197,7 @@ class Demo {
     const bloqueado = this.e.usuario === 'bloqueado'
     const user: User = { id: YO, email: 'lucho@ejemplo.test', name: 'Lucho', nickname: this.nickname, picture: null, status: bloqueado ? 'blocked' : 'approved', blockedReason: bloqueado ? 'Uso indebido de la cuenta' : null, role: this.e.rol === 'admin' ? 'admin' : 'player', balance: { ...this.balance }, notice: this.notice }
     switch (path) {
-      case '/api/site': return structuredClone({ config: this.config, rooms: this.e.general === 'vacio' ? [] : [{ id: 'sala-1', name: 'Sala 1', console: 'PS4', game: 'Partida libre' }], games: this.games })
+      case '/api/site': return structuredClone({ config: this.config, rooms: this.e.general === 'vacio' ? [] : [this.info], games: this.games })
       case '/api/me': return { user: this.entro ? user : null, devLogin: false }
       case '/api/turn': return { iceServers: [] }
       case '/api/recharges': return structuredClone({ recharges: mias })
@@ -272,7 +273,8 @@ class Demo {
     } else if (path.startsWith('/api/admin/games/')) {
       const g = this.games.find((x) => x.id === id)
       if (g) g.status = c.status as Game['status']
-    } else if (path === '/api/admin/config') Object.assign(this.config, b)
+    } else if (path.startsWith('/api/admin/rooms/')) Object.assign(this.info, b)
+    else if (path === '/api/admin/config') Object.assign(this.config, b)
     else if (path === '/api/admin/room') this.admin(b as unknown as RoomAction)
     else if (!path.endsWith('/rating')) throw new ApiError('No encontrado', 404)
     setTimeout(() => this.avisar())
