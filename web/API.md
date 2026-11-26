@@ -28,6 +28,8 @@ o `null`. Todas las POST validan `Origin`. Horas en ms desde 1970.
 | `POST /api/turn/decline` | | Deja pasar la oferta; la reserva vuelve |
 | `POST /api/turn/end` | | Termina su turno antes de tiempo, sin devolución |
 | `GET /api/turn` | | Servidores ICE |
+| `GET /api/turn/test` | | Servidores ICE por 2 minutos, para la prueba de conexión (con sesión) |
+| `GET /api/speed` | | Hasta 25 MB al azar, para medir la velocidad de bajada (con sesión) |
 | `GET /api/recharges` | | `{ recharges }`, la más nueva primero |
 | `POST /api/recharges` | `{ amount, operation, key }` | Crea una pendiente. `operation` es texto (conserva ceros). `key` evita duplicados al reintentar |
 | `GET /api/movements`, `GET /api/sessions` | | Historial, lo más nuevo primero |
@@ -35,7 +37,7 @@ o `null`. Todas las POST validan `Origin`. Horas en ms desde 1970.
 
 ## Admin
 
-`GET /api/admin/summary`, `recharges?status=`, `users`, `sessions`, `games`. Y `POST`:
+`GET /api/admin/summary`, `recharges?status=`, `users`, `sessions`, `sessions/:id/events`, `games`. Y `POST`:
 
 | Ruta | Cuerpo |
 |---|---|
@@ -44,6 +46,7 @@ o `null`. Todas las POST validan `Origin`. Horas en ms desde 1970.
 | `/api/admin/users/:id/balance` | `{ delta, reason }`. Nunca deja saldo negativo |
 | `/api/admin/games/:id` | `{ status }` |
 | `/api/admin/config` | Precio, Yape y canal |
+| `/api/admin/sessions/:id/refund` | `{ credits, reason, key }`: partida terminada, sin pasar de lo cobrado. `key` evita duplicados |
 | `/api/admin/rooms/:id` | `{ name, console, game }`: lo que se muestra de la sala. `game` puede ir vacío |
 | `/api/admin/room` | `RoomAction`: take, release, skip, pause, resume, reorder, refund, youtube |
 
@@ -51,12 +54,14 @@ o `null`. Todas las POST validan `Origin`. Horas en ms desde 1970.
 
 Sala a navegador: `{type:"state", state}` al conectar y en cada cambio, `{type:"me"}` al usuario cuyo saldo,
 aviso o cuenta cambió, `{type:"signal", data}` solo al jugador, `{type:"error", message}`.
-Navegador a sala: `{type:"signal", data}` y `"ping"`.
+Navegador a sala: `{type:"signal", data}`, `{type:"quality", rtt, loss, jitter}` cada 30 s (solo quien juega) y `"ping"`.
 
 - `state.queue`, `current` y `offer` llevan apodo, nunca correo. `minutes` es lo que jugará cada uno.
 - `current.endsAt` es `null` cuando el admin tomó el control. El jugador detenido vuelve primero a la cola
   con sus minutos restantes en `minutes`, sin pagar otra vez al aceptar.
 - El agente manda `{type:"status", ps4, fault}`; `fault` distingue una falla nuestra de que el jugador se fue.
+- `outage: {since, until}` mientras hay una falla nuestra; el reloj del turno se muestra detenido en `since`.
+- El agente manda `{type:"viewer", userId, connected}` cuando el video del jugador conecta o se corta.
 - `paused` sin jugador se muestra como "En mantenimiento".
 - `ps4Connected` no indica consola apagada (la sesión es bajo demanda). Para eso, `consoleOff: true`.
 - Los cobros y devoluciones deben decidirse en el servidor. El frontend solo los muestra.

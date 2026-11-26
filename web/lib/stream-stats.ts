@@ -15,8 +15,32 @@ export type StreamStats = {
   rttMs: number | null // ida y vuelta de la red hasta el agente
   jitterMs: number // variación en la llegada de los paquetes de video
   lossPercent: number // paquetes de video perdidos en los últimos segundos
-  route: 'directa' | 'relé' | null
+  route: Route | null // por el relé: cómo llega este navegador al relé (UDP es lo normal; TCP, si la red bloquea UDP)
   network: string | null // Wi-Fi, datos, cable (solo si el navegador lo informa)
+}
+
+export type Route = 'directa' | 'relé UDP' | 'relé TCP' | 'relé TLS' | 'relé'
+
+export type RelayProtocol = 'UDP' | 'TCP' | 'TLS'
+
+// Cómo llega este navegador al relé. Solo lo informa el candidato local; null si no es relé o no se sabe.
+export function relayProtocolOf(local: { candidateType?: string; relayProtocol?: string } | undefined): RelayProtocol | null {
+  const p = String(local?.relayProtocol ?? '').toUpperCase()
+  return local?.candidateType === 'relay' && (p === 'UDP' || p === 'TCP' || p === 'TLS') ? p : null
+}
+
+// El par de candidatos en uso de una conexión (puede haber varios nominados; Firefox no siempre informa el seleccionado).
+export async function localCandidateInUse(pc: RTCPeerConnection): Promise<Record<string, string> | undefined> {
+  const report = await pc.getStats()
+  let selectedId: string | null = null
+  let nominatedId: string | null = null
+  report.forEach((entry) => {
+    if (entry.type === 'transport' && entry.selectedCandidatePairId) selectedId = entry.selectedCandidatePairId
+    if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.nominated) nominatedId = entry.id
+  })
+  const pairId = selectedId ?? nominatedId
+  const pair = pairId ? report.get(pairId) : null
+  return pair ? report.get(pair.localCandidateId) : undefined
 }
 
 export type NetworkQuality = 'Buena' | 'Regular' | 'Mala'
@@ -30,7 +54,7 @@ export function networkQuality(rttMs: number, lossPercent: number): NetworkQuali
 
 const NETWORK_NAMES: Record<string, string> = { wifi: 'Wi-Fi', cellular: 'datos móviles', ethernet: 'cable' }
 
-function networkName(): string | null {
+export function networkName(): string | null {
   const type = (navigator as Navigator & { connection?: { type?: string } }).connection?.type
   return (type && NETWORK_NAMES[type]) || null
 }
@@ -85,7 +109,15 @@ export function startStreamStats(
     const pair = pairId ? report.get(pairId) : null
     const rttMs = typeof pair?.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null
     const ends = pair ? [report.get(pair.localCandidateId), report.get(pair.remoteCandidateId)] : []
-    const route = !pair ? null : ends.some((c) => c?.candidateType === 'relay') ? 'relé' : 'directa'
+    const relay = ends.find((c) => c?.candidateType === 'relay')
+    const relayProtocol = relayProtocolOf(ends[0])
+    const route: Route | null = !pair
+      ? null
+      : !relay
+        ? 'directa'
+        : relayProtocol === 'UDP' || relayProtocol === 'TCP' || relayProtocol === 'TLS'
+          ? `relé ${relayProtocol}`
+          : 'relé'
     const r = inbound as Record<string, number>
 
     const quality = video.getVideoPlaybackQuality()

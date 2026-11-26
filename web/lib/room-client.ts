@@ -15,6 +15,8 @@ export type RoomState = {
   // sirve para saber si está apagada; para eso está consoleOff.
   ps4Connected: boolean
   consoleOff?: boolean
+  // Falla nuestra en curso: el reloj del turno se detuvo en 'since'; en 'until' se devuelve lo no jugado.
+  outage?: { since: number; until: number } | null
   now: number // reloj del servidor al enviar el estado
 }
 

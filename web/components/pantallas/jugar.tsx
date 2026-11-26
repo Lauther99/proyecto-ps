@@ -16,6 +16,7 @@ import { useVista } from "@/lib/vista";
 
 const t = T.jugar;
 const REINTENTO_MS = 5000;
+const CALIDAD_MS = 30_000;
 
 function Dato({ icono, etiqueta, children, alerta }: { icono: NombreIcono; etiqueta: string; children: ReactNode; alerta?: boolean }) {
   return <span className={`inline-flex items-center gap-2 t-data whitespace-nowrap ${alerta ? "text-warn" : ""}`}><Icono nombre={alerta ? "alerta" : icono} t={20} /><span className="sr-only">{etiqueta}: </span>{children}</span>;
@@ -45,9 +46,9 @@ function usePantallaCompleta() {
 }
 
 function Juego({ cliente, iceServers }: { cliente: Room; iceServers: RTCIceServer[] }) {
-  const { usuario, sala, salaUrl, restanteMs, sinLimite, precio, refrescar } = useVista();
+  const { usuario, sala, salaUrl, restanteMs, fallaMs, sinLimite, precio, refrescar } = useVista();
   const [signaling] = useState(() => roomSignaling(cliente));
-  const { videoRef, status, inputSource, stats, diagnostics, muted, setVolume, latencyMode, changeLatencyMode, onPlaying } = usePlayer(signaling, iceServers);
+  const { videoRef, status, inputSource, stats, diagnostics, drops, muted, setVolume, latencyMode, changeLatencyMode, onPlaying } = usePlayer(signaling, iceServers);
   const [terminar, setTerminar] = useState(false);
   const [visibles, setVisibles] = useState(true);
   const [verStats, setVerStats] = useState(false);
@@ -64,6 +65,17 @@ function Juego({ cliente, iceServers }: { cliente: Room; iceServers: RTCIceServe
     window.addEventListener("gamepaddisconnected", sale);
     return () => { window.removeEventListener("gamepadconnected", entra); window.removeEventListener("gamepaddisconnected", sale); };
   }, []);
+
+  // Ping y pérdida cada 30 s para el registro de la partida (pista para revisar reclamos).
+  const ultimas = useRef(stats);
+  useEffect(() => { ultimas.current = stats; }, [stats]);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = ultimas.current;
+      if (s && s.rttMs !== null) cliente.send({ type: "quality", rtt: s.rttMs, loss: s.lossPercent, jitter: s.jitterMs, route: s.route });
+    }, CALIDAD_MS);
+    return () => clearInterval(id);
+  }, [cliente]);
 
   // Escape abre "Terminar" (Tab y Enter son botones del juego). En pantalla completa, Escape sale de ella.
   useEffect(() => {
@@ -87,6 +99,7 @@ function Juego({ cliente, iceServers }: { cliente: Room; iceServers: RTCIceServe
   const datos = stats && {
     ping: stats.rttMs === null ? "--" : `${stats.rttMs} ms`, jitter: `${stats.jitterMs} ms`, perdida: `${stats.lossPercent} %`,
     fps: String(stats.fpsShown), resolucion: `${stats.width}×${stats.height}`, tasa: `${stats.mbps} Mbps`,
+    bufer: `${stats.bufferMs} ms`, ruta: stats.route ?? "--", cortes: String(drops),
   };
   const control = "pulsable grid size-11 shrink-0 place-items-center rounded-md hover:bg-raised aria-pressed:bg-accent-deep";
   // Un botón con foco reaccionaría a la barra espaciadora mientras se juega.
@@ -127,7 +140,9 @@ function Juego({ cliente, iceServers }: { cliente: Room; iceServers: RTCIceServe
           </dl>
         ) : <div className="pointer-events-none absolute right-3 bottom-3 z-[11] rounded-md bg-ground/90 p-4 t-data">{diagnostics.map((l) => <p key={l}>{l}</p>)}</div>)}
         {!visibles && <button type="button" aria-label={t.mostrar} onClick={() => setVisibles(true)} className={`${control} absolute bottom-3 left-3 z-[12] bg-ground/80`}><Icono nombre="ojo" /></button>}
-        {cortado ? (
+        {fallaMs !== null ? (
+          <Cubierta titulo={t.fallaTitulo} texto={t.fallaTexto}><p role="timer" className="t-score">{reloj(fallaMs)}</p><Enlace href={salaUrl} variante="secundario">{t.salir}</Enlace></Cubierta>
+        ) : cortado ? (
           <Cubierta titulo={t.reconTitulo} texto={sala?.agentOnline === false ? t.sinAgente : t.reconTexto}>{!sinLimite && <p className="t-score">{reloj(restanteMs)}</p>}<Enlace href={salaUrl} variante="secundario">{t.salir}</Enlace></Cubierta>
         ) : status !== "reproduciendo" && (
           <Cubierta titulo={t.conectando} texto={sala?.agentOnline === false ? t.sinAgente : t.conectandoTexto}><Enlace href={salaUrl} variante="secundario">{t.salir}</Enlace></Cubierta>

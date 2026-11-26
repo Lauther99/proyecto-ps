@@ -13,13 +13,14 @@ import { startDiagnostics, startStreamStats, type StreamStats } from './stream-s
 export type PlayerStatus = 'esperando oferta' | 'negociando' | 'conectando' | 'reproduciendo' | 'desconectado' | 'error'
 
 // En datos móviles algunos servidores TURN no responden y reunir todos los candidatos tarda mucho.
-// Respondemos a los 3 s con lo que haya; si aún no hay ningún relé, esperamos hasta 8 s.
-const GATHER_SOFT_MS = 3000
+// Respondemos a los 1,5 s con lo que haya; si aún no hay ningún relé, esperamos hasta 8 s.
+const GATHER_SOFT_MS = 1500
 const GATHER_HARD_MS = 8000
 // Si no hay conexión, se pide una oferta nueva cada tanto. Negociar toma hasta 8 s: mientras tanto
 // no se pide otra, porque reiniciaría la conexión a medio hacer.
 const RETRY_MS = 4000
-const CONNECTING_LIMIT_MS = 20_000
+// Si la red se congela justo al reconectar, este límite es lo que se tarda en volver a intentar.
+const CONNECTING_LIMIT_MS = 10_000
 
 function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
   return new Promise((resolve) => {
@@ -48,6 +49,8 @@ export function usePlayer(signaling: Signaling, iceServers?: RTCIceServer[]) {
   const [stats, setStats] = useState<StreamStats | null>(null)
   const [diagnostics, setDiagnostics] = useState<string[]>([])
   const [muted, setMuted] = useState(true)
+  // Veces que se cortó la conexión de video en esta visita (para ver si la red es intermitente).
+  const [drops, setDrops] = useState(0)
 
   // Baja latencia o estable: se recuerda en este navegador y se puede cambiar mientras se juega.
   const [latencyMode, setLatencyMode] = useState<LatencyMode>(loadLatencyMode)
@@ -98,6 +101,7 @@ export function usePlayer(signaling: Signaling, iceServers?: RTCIceServer[]) {
     const newPeer = () => {
       closePeer()
       const peer = new RTCPeerConnection({ iceServers })
+      let wasConnected = false
       pc = peerRef.current = peer
       stopDiagnostics = startDiagnostics(peer, setDiagnostics)
       // Solo en desarrollo: deja la conexión accesible desde la consola para depurar (window.pc).
@@ -120,6 +124,8 @@ export function usePlayer(signaling: Signaling, iceServers?: RTCIceServer[]) {
       peer.onconnectionstatechange = () => {
         if (pc !== peer) return
         setDetail(`WebRTC: ${peer.connectionState}`)
+        if ((peer.connectionState === 'disconnected' || peer.connectionState === 'failed') && wasConnected) setDrops((n) => n + 1)
+        wasConnected = peer.connectionState === 'connected'
         if (peer.connectionState === 'failed') setStatus('desconectado')
         // "disconnected" puede volver solo; si lo hace, el video sigue sin otro evento "playing".
         if (peer.connectionState === 'connected' && statusRef.current.value === 'desconectado') setStatus('reproduciendo')
@@ -169,5 +175,5 @@ export function usePlayer(signaling: Signaling, iceServers?: RTCIceServer[]) {
     }
   }, [signaling, iceServers])
 
-  return { videoRef, status, detail, inputSource, stats, diagnostics, muted, setVolume, latencyMode, changeLatencyMode, onPlaying }
+  return { videoRef, status, detail, inputSource, stats, diagnostics, drops, muted, setVolume, latencyMode, changeLatencyMode, onPlaying }
 }

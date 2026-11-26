@@ -30,19 +30,19 @@ export default function Inicio() {
       <div className="flex flex-col gap-20 md:gap-28">
         <div className="flex flex-col gap-6 md:gap-8">
           <section className="flex flex-col gap-6 pt-4 lg:flex-row lg:items-end lg:justify-between">
-            <h1 className="t-display">{t.titulo[0]}<br />{t.titulo[1]}</h1>
-            <div className="flex max-w-[464px] flex-col gap-4">
-              <p className="text-muted">{t.texto(precio)}</p>
-              <div className="flex flex-col gap-x-6 gap-y-2 sm:flex-row sm:items-center">
-                <Enlace href={sala ? `/sala?id=${encodeURIComponent(sala.id)}` : "/salas"}>{t.accion}</Enlace>
-                <EnlaceTexto href="#como" className="justify-center">{t.como}</EnlaceTexto>
-              </div>
-            </div>
+            {/* <h1 className="t-display">{t.titulo[0]}<br />{t.titulo[1]}</h1> */}
+              {/* <div className="flex max-w-[464px] flex-col gap-4">
+                <p className="text-muted">{t.texto(precio)}</p>
+                <div className="flex flex-col gap-x-6 gap-y-2 sm:flex-row sm:items-center">
+                  <Enlace href={sala ? `/sala?id=${encodeURIComponent(sala.id)}` : "/salas"}>{t.accion}</Enlace>
+                  <EnlaceTexto href="#como" className="justify-center">{t.como}</EnlaceTexto>
+                </div>
+              </div> */}
           </section>
           <EstadoGeneral requiere={["sitio", "sala"]}><Vivo /></EstadoGeneral>
         </div>
 
-        <section id="como" aria-labelledby="como-t" className="grid scroll-mt-8 gap-8 lg:grid-cols-[400px_1fr]">
+        {/* <section id="como" aria-labelledby="como-t" className="grid scroll-mt-8 gap-8 lg:grid-cols-[400px_1fr]">
           <h2 id="como-t" className="t-heading">{t.pasosTitulo}</h2>
           <ol className="flex flex-col divide-y divide-raised border-y border-raised">
             {t.pasos(precio).map(([tit, tex], i) => (
@@ -74,7 +74,7 @@ export default function Inicio() {
           {[[t.conexionTitulo, t.conexionTexto, t.conexionAccion, "/prueba"], [t.devolucionTitulo, t.devolucionTexto, t.devolucionAccion, "/reembolsos"]].map(([a, b, c, h]) => (
             <section key={h} className="flex max-w-[52ch] flex-col items-start gap-2"><h2 className="t-heading">{a}</h2><p className="text-muted">{b}</p><EnlaceTexto href={h}>{c}</EnlaceTexto></section>
           ))}
-        </div>
+        </div> */}
       </div>
     </Pagina>
   );

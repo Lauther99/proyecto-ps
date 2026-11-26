@@ -42,6 +42,7 @@ function Contenido() {
         id: x.id,
         celdas: [
           <strong key="a" className="font-semibold">{x.nickname}{x.role === "admin" && <span className="ml-2 t-label text-muted">{t.admin}</span>}</strong>, <span key="c" className="text-muted">{x.email}</span>, <span key="s" className="font-mono font-bold">{x.available}</span>,
+          <span key="d" className="font-mono">{x.manualRefunds}</span>,
           <Estado key="e" tono={x.status === "blocked" ? "aviso" : "bien"} icono={x.status === "blocked" ? "x" : "check"}>{x.status === "blocked" ? t.bloqueado : t.activo}</Estado>,
           <span key="b" className="flex flex-wrap justify-end gap-2 lg:justify-start"><Boton variante="secundario" className="!min-h-11 !px-4" onClick={() => abrir("saldo", x.id)}>{t.ajustar}</Boton>{x.id === yo?.id ? <span className="self-center t-label text-muted">{t.tu}</span> : <><Boton variante="secundario" className="!min-h-11 !px-4" onClick={() => abrir("rol", x.id)}>{x.role === "admin" ? t.quitarAdmin : t.hacerAdmin}</Boton><Boton variante={x.status === "blocked" ? "secundario" : "peligro"} className="!min-h-11 !px-4" onClick={() => abrir("bloqueo", x.id)}>{x.status === "blocked" ? t.desbloquear : t.bloquear}</Boton></>}</span>,
         ],

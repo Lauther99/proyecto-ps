@@ -1,13 +1,15 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, request } from "./api";
+import { useSistema } from "./sistema";
 
 export const mensaje = (e: unknown) => (e instanceof ApiError ? e.message : "No se pudo completar. Intenta otra vez.");
 
-/** Pide datos al montar (o al cambiar la ruta). Con ruta null no pide nada. */
+/** Pide datos al montar, al cambiar la ruta y cuando cambia la sesión (saldo o avisos). Con ruta null no pide nada. */
 export function useDatos<T>(ruta: string | null) {
   const [estado, setEstado] = useState<{ ruta: string | null; datos: T | null; error: string | null }>({ ruta, datos: null, error: null });
   const [vez, setVez] = useState(0);
+  const sesion = useSistema().sesion.datos;
   useEffect(() => {
     if (!ruta) return;
     let vivo = true;
@@ -18,7 +20,7 @@ export function useDatos<T>(ruta: string | null) {
     return () => {
       vivo = false;
     };
-  }, [ruta, vez]);
+  }, [ruta, vez, sesion]);
   const recargar = useCallback(() => setVez((n) => n + 1), []);
   return { datos: estado.ruta === ruta ? estado.datos : null, error: estado.ruta === ruta ? estado.error : null, recargar };
 }

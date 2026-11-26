@@ -77,7 +77,9 @@ const KEY_STICKS: Record<string, [stick: 'l' | 'r', axis: 'x' | 'y', dir: 1 | -1
 const AXIS_MAX = 32767
 const DEADZONE = 0.12 // ignora el pequeño desvío de palancas gastadas
 const READ_EVERY_MS = 8 // lectura del mando (125 Hz), independiente de los fotogramas de la pantalla
-const SEND_EVERY_MS = 33 // ~30 veces por segundo, aunque no cambie nada (el agente suelta todo si dejamos de mandar)
+const SEND_EVERY_MS = 33 // sin cambios, repetimos ~30 veces por segundo (el agente suelta todo si dejamos de mandar)
+const CHANGE_REPEATS = 2 // tras un cambio, repetimos en las 2 lecturas siguientes por si se pierde un paquete
+const REPEAT_MIN_GAP_MS = READ_EVERY_MS / 2 // que una tecla y la lectura que le sigue no gasten repeticiones casi a la vez
 
 type PadState = { b: number; l2: number; r2: number; lx: number; ly: number; rx: number; ry: number }
 
@@ -148,6 +150,7 @@ export function startControllerInput(
   let seq = 0
   let lastSent = ''
   let lastSentAt = 0
+  let repeatsLeft = 0
   let lastSource: InputSource = ''
 
   // Con un cuadro de diálogo abierto, el teclado es de la página y no del juego.
@@ -188,10 +191,15 @@ export function startControllerInput(
       onSourceChange(source)
     }
 
-    // Mandamos al cambiar algo, y además cada 33 ms como "sigo aquí".
+    // Mandamos al cambiar algo (con repeticiones rápidas) y además cada 33 ms como "sigo aquí".
     const body = JSON.stringify(state)
     const now = performance.now()
-    if (body === lastSent && now - lastSentAt < SEND_EVERY_MS) return
+    if (body !== lastSent) {
+      repeatsLeft = CHANGE_REPEATS
+    } else {
+      if (now - lastSentAt < (repeatsLeft > 0 ? REPEAT_MIN_GAP_MS : SEND_EVERY_MS)) return
+      if (repeatsLeft > 0) repeatsLeft -= 1
+    }
     lastSent = body
     lastSentAt = now
     seq += 1

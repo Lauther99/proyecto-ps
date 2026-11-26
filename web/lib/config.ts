@@ -20,4 +20,6 @@ export const reloj = (ms: number) => {
 };
 const FECHA = new Intl.DateTimeFormat("es-PE", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "America/Lima" });
 export const fecha = (ms: number) => FECHA.format(ms);
+const HORA = new Intl.DateTimeFormat("es-PE", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZone: "America/Lima" });
+export const hora = (ms: number) => HORA.format(ms);
 export const minutos = (ms: number) => `${Math.round(ms / 60_000)} min`;

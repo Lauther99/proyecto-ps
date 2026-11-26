@@ -69,9 +69,10 @@ export const T = {
   comprar: {
     titulo: "Elige cuánto quieres jugar", bloque: "Bloque de tiempo", minutos: (m: number) => `${m} min`, creditos: (c: number) => `${c} créditos`, falta: (n: number) => `Te faltan ${n}`, elegido: "Elegido",
     resumen: "Tu reserva", antes: "Saldo ahora", reserva: "Se reserva", despues: "Saldo después", esperaL: "Espera aproximada", conexionL: "Tu conexión",
-    datos: (p: number, j: number, l: number) => `Ping ${p} ms, jitter ${j} ms, fallos ${l} %`, probar: "Probar mi conexión", repetir: "Probar otra vez",
+    datos: (p: number, j: number, l: number) => `Ping ${p} ms, jitter ${j} ms, pérdida ${l} %`, probar: "Probar mi conexión", repetir: "Probar otra vez",
     nombres: { buena: "Buena", regular: "Regular", mala: "Mala", sinProbar: "Sin probar" },
     avisoMala: ["Tu conexión es mala", "El juego puede verse entrecortado o responder tarde. Conecta un cable de red o usa Wi-Fi de 5 GHz y prueba otra vez. Las fallas de tu internet no tienen devolución."],
+    avisoTcp: ["Tu red no deja pasar UDP", "El juego irá por un camino más lento y puede cortarse. Apaga tu VPN o proxy, revisa el firewall de tu antivirus o prueba otra red, como los datos de tu celular. Luego mide otra vez."],
     avisoRegular: "Se puede jugar, pero notarás demoras en juegos rápidos. Un cable de red ayuda.", avisoSin: "Mide tu conexión antes de reservar.",
     entiendo: "Entiendo y quiero continuar", confirmar: (m: number) => `Reservar ${m} minutos`,
     nota: (p: Precio) => `Se cobra cuando aceptas tu turno. Tendrás ${p.acceptSeconds} segundos. Si sales antes, tus créditos vuelven.`,
@@ -79,9 +80,9 @@ export const T = {
   },
   recargar: {
     titulo: "Recarga con Yape", saldo: "Tu saldo", monto: "Cuánto quieres recargar", otro: "Otro monto en soles", recibes: (n: number) => `Recibes ${n} créditos`, montoError: "Escribe un monto de S/ 1 o más, sin céntimos.",
-    yapea: (s: string) => `Yapea ${s}`, qr: "QR de Yape", sinQr: "Por ahora usa el número", noCopio: "No se pudo copiar", cerrado: "Las recargas no están disponibles", cerradoTexto: "Todavía no hay una cuenta de Yape configurada. Vuelve más tarde.", titular: "Titular", numero: "Número", copiar: "Copiar número", copiado: "Copiado",
+    yapea: (s: string) => `Yapea ${s}`, qr: "QR de Yape", sinQr: "Por ahora usa el número", noCopio: "No se pudo copiar", cerrado: "Las recargas no están disponibles", cerradoTexto: "Vuelve más tarde.", titular: "Titular", numero: "Número", copiar: "Copiar número", copiado: "Copiado",
     pasos: ["Abre Yape y escanea el QR. Si estás en el celular, copia el número.", "Revisa que el titular coincida y yapea el monto exacto.", "Escribe aquí el número de operación de tu comprobante."],
-    operacion: "Número de operación", ayuda: "Está en el comprobante de Yape. Solo números.", errorOp: "Escribe el número de operación, solo números (4 a 20).", enviar: "Enviar recarga", nota: "Una persona revisa cada pago. No pedimos capturas.",
+    operacion: "Número de operación", ayuda: "Está en el comprobante de Yape. Son 6 dígitos.", errorOp: "Escribe los 6 dígitos del número de operación.", enviar: "Enviar recarga", nota: "Una persona revisa cada pago. No pedimos capturas.",
     historial: "Tus recargas", sinHistorial: "Todavía no tienes recargas.", seguimiento: "Tu recarga", corregir: "Corregir y enviar otra vez", jugar: "Hacer cola", nueva: "Hacer otra recarga",
     estados: { pendiente: "Pendiente", aprobada: "Aprobada", rechazada: "Rechazada" },
     mensajes: { pendiente: "Estamos revisando tu pago. Puedes cerrar esta página.", aprobada: (n: number) => `Sumamos ${n} créditos a tu saldo.`, rechazada: (m: string | null) => `Motivo: ${m ?? "no encontramos el pago"}` },
@@ -92,7 +93,8 @@ export const T = {
     cinco: "Te quedan 5 minutos. Guarda tu partida.", uno: "Te queda 1 minuto. Guarda ahora.", sinMando: "Tu mando se desconectó. Conéctalo por USB y presiona un botón.",
     terminarTitulo: "¿Terminar tu turno?", terminarTexto: (m: number): string => `Te quedan ${m} min. Si terminas ahora, no se devuelven.`, seguir: "Seguir jugando",
     reconTitulo: "Volviendo a conectar", reconTexto: "Se cortó tu conexión. Tu turno sigue corriendo.", salir: "Volver a la sala",
+    fallaTitulo: "Falló nuestro servicio", fallaTexto: "Tu tiempo está detenido. Si no vuelve antes de que termine la cuenta, te devolvemos lo que no jugaste.",
     sinTurno: "Todavía no es tu turno", sinTurnoTexto: "Solo entra quien tiene el turno. Puedes mirar el directo en la sala.", gira: "Gira tu teléfono para jugar mejor.",
-    stats: { ping: "Ping", jitter: "Jitter", perdida: "Pérdida", fps: "Cuadros", resolucion: "Resolución", tasa: "Datos" },
+    stats: { ping: "Ping", jitter: "Jitter", perdida: "Pérdida", fps: "Cuadros", resolucion: "Resolución", tasa: "Datos", bufer: "Búfer", ruta: "Ruta", cortes: "Cortes" },
   },
 };

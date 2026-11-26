@@ -1,11 +1,12 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Icono } from "@/components/icono";
-import { Pagina } from "@/components/marco";
-import { Boton, Enlace, Estado } from "@/components/ui";
+import { BotonAcceso, Pagina } from "@/components/marco";
+import { Aviso, Boton, Enlace, Estado } from "@/components/ui";
 import { T } from "@/data/textos";
 import { P } from "@/data/textos-publico";
-import { medir, useMedicion } from "@/lib/conexion";
+import { ApiError } from "@/lib/api";
+import { PestanaOculta, medir, useMedicion } from "@/lib/conexion";
 
 const t = P.prueba;
 const TONO = { buena: "bien", regular: "neutro", mala: "aviso", sinProbar: "apagado" } as const;
@@ -15,7 +16,7 @@ function Conexion() {
   const m = useMedicion();
   const c = m?.calidad ?? "sinProbar";
   const [midiendo, setMidiendo] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<"fallo" | "entra" | "oculta" | null>(null);
   const cancelado = useRef(false);
   useEffect(() => {
     cancelado.current = false;
@@ -23,24 +24,26 @@ function Conexion() {
   }, []);
   const iniciar = async () => {
     setMidiendo(true);
-    setError(false);
+    setError(null);
     try {
       await medir(() => cancelado.current);
-    } catch {
-      if (!cancelado.current) setError(true);
+    } catch (e) {
+      if (!cancelado.current) setError(e instanceof ApiError && e.status === 401 ? "entra" : e instanceof PestanaOculta ? "oculta" : "fallo");
     }
     if (!cancelado.current) setMidiendo(false);
   };
-  const valores = m ? [`${m.ping} ms`, `${m.jitter} ms`, `${m.fallos} %`] : ["--", "--", "--"];
+  const valores = m ? [`${m.ping} ms`, `${m.jitter} ms`, `${m.fallos} %`, `${m.corte} ms`, m.velocidad === null ? "--" : (m.velocidad > 100 ? "+100 Mbps" : `${Math.round(m.velocidad)} Mbps`), m.ruta ?? "--"] : t.medidas.map(() => "--");
+  const sinUdp = !midiendo && (m?.ruta === "TCP" || m?.ruta === "TLS");
   return (
     <section aria-labelledby="con" className="flex flex-col gap-6 rounded-md bg-surface p-6">
       <div className="flex flex-wrap items-center justify-between gap-3"><h2 id="con" className="t-title">{t.conexion}</h2>{!midiendo && <Estado tono={TONO[c]} icono={ICONO[c]}>{T.comprar.nombres[c]}</Estado>}</div>
       <p className="text-muted">{t.conexionTexto}</p>
-      <dl className={`grid grid-cols-3 gap-4 ${midiendo ? "pulso" : ""}`}>
-        {t.medidas.map(([n, d], i) => <div key={n}><dt className="t-label">{n}</dt><dd className="font-mono text-xl leading-8 font-bold whitespace-nowrap sm:text-[28px] sm:leading-10">{midiendo ? "--" : valores[i]}</dd><dd className="t-label font-normal text-muted">{d}</dd></div>)}
+      <dl className={`grid grid-cols-2 gap-x-4 gap-y-6 xl:grid-cols-3 ${midiendo ? "pulso" : ""}`}>
+        {t.medidas.map(([n, d], i) => <div key={n}><dt className="t-label">{n}</dt><dd className="font-mono text-xl leading-8 font-bold whitespace-nowrap sm:text-[28px] sm:leading-10">{midiendo ? "--" : valores[i]}</dd><dd className="t-label font-normal text-muted">{i === 5 && m?.red && !midiendo ? t.porRed(m.red) : d}</dd></div>)}
       </dl>
-      <p role="status" className="min-h-6">{midiendo ? t.midiendo : error ? t.falloMedir : c === "sinProbar" ? t.sin : t.resultado[c]}</p>
-      <Boton variante={c === "sinProbar" ? "principal" : "secundario"} disabled={midiendo} onClick={() => void iniciar()}>{c === "sinProbar" ? t.medir : t.otra}</Boton>
+      <p role="status" className="min-h-6">{midiendo ? t.midiendo : error ? (error === "entra" ? t.entra : error === "oculta" ? t.oculta : t.falloMedir) : c === "sinProbar" ? t.sin : t.resultado[c]}</p>
+      {sinUdp && <Aviso titulo={T.comprar.avisoTcp[0]}>{T.comprar.avisoTcp[1]}</Aviso>}
+      {error === "entra" ? <BotonAcceso /> : <Boton variante={c === "sinProbar" ? "principal" : "secundario"} disabled={midiendo} onClick={() => void iniciar()}>{c === "sinProbar" ? t.medir : t.otra}</Boton>}
     </section>
   );
 }

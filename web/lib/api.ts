@@ -53,9 +53,21 @@ export type PlaySession = {
   result: SessionResult
 }
 
-export type AdminUser = Pick<User, 'id' | 'email' | 'nickname' | 'status' | 'role'> & { available: number }
+export type AdminUser = Pick<User, 'id' | 'email' | 'nickname' | 'status' | 'role'> & { available: number; manualRefunds: number }
 export type AdminRecharge = Recharge & { nickname: string; repeated: boolean }
 export type AdminSession = PlaySession & { nickname: string }
+export type SessionEvent = { at: number; kind: string; detail: Record<string, unknown> | null }
+export type SessionReport = {
+  events: SessionEvent[]
+  report: {
+    verdict: 'ok' | 'ours' | 'player' | 'mixed' | 'noVideo' | 'poor' | 'noData'
+    playerOffMs: number
+    outageMs: number
+    cuts: number
+    badSamples: number
+    samples: number
+  }
+}
 export type AdminSummary = {
   agentLastSeen: number | null
   pendingRecharges: number
@@ -130,6 +142,7 @@ export const acceptTurn = () => post('/api/turn/accept')
 export const declineTurn = () => post('/api/turn/decline')
 export const endTurn = () => post('/api/turn/end')
 export const fetchIceServers = async () => (await request<{ iceServers: IceServer[] }>('/api/turn')).iceServers
+export const fetchTestIceServers = async () => (await request<{ iceServers: IceServer[] }>('/api/turn/test')).iceServers
 
 // --- créditos e historial ---
 export const createRecharge = (amount: number, operation: string, key: string) =>
@@ -142,6 +155,7 @@ export const resolveRecharge = (id: string, change: { status: 'approved' } | { s
 export const updateUser = (id: string, change: { status: 'approved' | 'blocked'; reason: string } | { role: UserRole }) =>
   post(`/api/admin/users/${id}`, change)
 export const adjustBalance = (id: string, delta: number, reason: string) => post(`/api/admin/users/${id}/balance`, { delta, reason })
+export const refundSession = (id: string, credits: number, reason: string, key: string) => post(`/api/admin/sessions/${id}/refund`, { credits, reason, key })
 export const updateRoom = (id: string, room: Omit<RoomInfo, 'id'>) => post(`/api/admin/rooms/${id}`, room)
 export const roomAction = (action: RoomAction) => post('/api/admin/room', action)
 export const updateGame = (id: string, status: GameStatus) => post(`/api/admin/games/${id}`, { status })

@@ -101,11 +101,11 @@ class Demo {
     const r = (id: string, nickname: string, amount: number, operation: string, horas: number, status: RechargeStatus, reason: string | null = null, repeated = false): AdminRecharge => ({ id, nickname, amount, operation, createdAt: ahora - horas * 60 * MIN, status, reason, repeated })
     const estados = { pendiente: 'pending', aprobada: 'approved', rechazada: 'rejected' } as const
     this.recharges = vacio ? [] : [
-      ...(recarga === 'ninguna' ? [] : [r('r0', this.nickname, 30, '04925518', 0.2, estados[recarga], recarga === 'rechazada' ? 'No encontramos un pago con ese número de operación' : null)]),
-      r('r1', 'Nina.pe', 15, '04817263', 0.5, 'pending', null, true),
-      r('r2', 'ElDeBreña', 60, '04924870', 1, 'pending'),
-      r('r3', this.nickname, 30, '04817263', 150, 'approved'),
-      r('r4', 'Chalaca07', 15, '04900011', 26, 'rejected', 'No encontramos el pago'),
+      ...(recarga === 'ninguna' ? [] : [r('r0', this.nickname, 30, '492551', 0.2, estados[recarga], recarga === 'rechazada' ? 'No encontramos un pago con ese número de operación' : null)]),
+      r('r1', 'Nina.pe', 15, '481726', 0.5, 'pending', null, true),
+      r('r2', 'ElDeBreña', 60, '492487', 1, 'pending'),
+      r('r3', this.nickname, 30, '481726', 150, 'approved'),
+      r('r4', 'Chalaca07', 15, '490001', 26, 'rejected', 'No encontramos el pago'),
     ]
     this.movements = vacio ? [] : [
       { id: 'm1', createdAt: ahora - 40 * 60 * MIN, detail: 'Devolución por falla de la consola', credits: 11 },
@@ -114,7 +114,7 @@ class Demo {
     ]
     const ses = (id: string, nickname: string, horas: number, min: number, result: SessionResult, refunded = 0) => ({ id, nickname, startedAt: ahora - horas * 60 * MIN, game: 'Partida libre', playedMs: min * MIN, chargedCredits: 15, refundedCredits: refunded, result })
     this.sessions = vacio ? [] : [u === 'interrumpida' ? ses('s1', this.nickname, 1, 8, 'interrupted', 11) : ses('s1', this.nickname, 1, 30, 'complete'), ses('s2', 'Kiara_gg', 3, 30, 'complete'), ses('s3', 'Nina.pe', 5, 19, 'left')]
-    const us = (id: string, nickname: string, available: number, status: 'approved' | 'blocked' = 'approved'): AdminUser => ({ id, nickname, email: `${id}@ejemplo.test`, available, status, role: 'player' })
+    const us = (id: string, nickname: string, available: number, status: 'approved' | 'blocked' = 'approved'): AdminUser => ({ id, nickname, email: `${id}@ejemplo.test`, available, status, role: 'player', manualRefunds: 0 })
     this.users = vacio ? [] : [{ ...us(YO, this.nickname, this.balance.available), role: 'admin' }, us('u2', 'Kiara_gg', 30), us('u3', 'ElDeBreña', 0), us('u4', 'Spammer_99', 5, 'blocked')]
     this.games = vacio ? [] : [
       { id: 'g1', name: 'Juego de ejemplo 1', genre: 'Fútbol', players: 2, status: 'available', art: ['..XXXX..', '.X.XX.X.', 'X.XXXX.X', 'XXXXXXXX', 'XX.XX.XX', 'X..XX..X', '.XX..XX.', '..XXXX..'] },
@@ -122,7 +122,7 @@ class Demo {
       { id: 'g3', name: 'Juego de ejemplo 3', genre: 'Aventura', players: 1, status: 'unavailable' },
     ]
     const med = { buena: [32, 4, 0], regular: [86, 14, 1], mala: [184, 41, 5] }
-    guardarMedicion(conexion === 'sinProbar' ? null : { ping: med[conexion][0], jitter: med[conexion][1], fallos: med[conexion][2], calidad: conexion, hora: ahora })
+    guardarMedicion(conexion === 'sinProbar' ? null : { ping: med[conexion][0], jitter: med[conexion][1], fallos: med[conexion][2], corte: med[conexion][1] * 2, velocidad: 60, red: null, ruta: conexion === 'mala' ? 'TCP' : 'UDP', calidad: conexion, hora: ahora })
   }
 
   room() {
@@ -192,6 +192,12 @@ class Demo {
   }
 
   private leer(path: string, ruta: string): unknown {
+    const partida = path.match(/^\/api\/admin\/sessions\/(.+)\/events$/)?.[1]
+    if (partida) {
+      const inicio = this.sessions.find((s) => s.id === partida)?.startedAt ?? 0
+      const ev = (s: number, kind: string, detail: Record<string, unknown> | null = null) => ({ at: inicio + s * 1000, kind, detail })
+      return { events: [ev(0, 'start'), ev(8, 'video_on'), ev(30, 'quality', { rtt: 48, loss: 0 }), ev(300, 'video_off'), ev(420, 'video_on'), ev(1800, 'end', { result: 'complete' })], report: { verdict: 'player', playerOffMs: 120_000, outageMs: 0, cuts: 1, badSamples: 0, samples: 1 } }
+    }
     const mias = this.recharges.filter((r) => r.nickname === this.nickname)
     const pendientes = this.recharges.filter((r) => r.status === 'pending')
     const bloqueado = this.e.usuario === 'bloqueado'
@@ -199,7 +205,8 @@ class Demo {
     switch (path) {
       case '/api/site': return structuredClone({ config: this.config, rooms: this.e.general === 'vacio' ? [] : [this.info], games: this.games })
       case '/api/me': return { user: this.entro ? user : null, devLogin: false }
-      case '/api/turn': return { iceServers: [] }
+      case '/api/turn':
+      case '/api/turn/test': return { iceServers: [] }
       case '/api/recharges': return structuredClone({ recharges: mias })
       case '/api/movements': return structuredClone({ movements: this.movements })
       case '/api/sessions': return structuredClone({ sessions: this.sessions.filter((s) => s.nickname === this.nickname) })
@@ -273,6 +280,9 @@ class Demo {
     } else if (path.startsWith('/api/admin/games/')) {
       const g = this.games.find((x) => x.id === id)
       if (g) g.status = c.status as Game['status']
+    } else if (path.startsWith('/api/admin/sessions/')) {
+      const s = this.sessions.find((x) => x.id === id)
+      if (s) s.refundedCredits += (b as unknown as { credits: number }).credits
     } else if (path.startsWith('/api/admin/rooms/')) Object.assign(this.info, b)
     else if (path === '/api/admin/config') Object.assign(this.config, b)
     else if (path === '/api/admin/room') this.admin(b as unknown as RoomAction)

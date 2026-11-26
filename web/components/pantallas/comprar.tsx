@@ -72,6 +72,7 @@ function Contenido() {
               <Estado tono={c === "buena" ? "bien" : c === "mala" ? "aviso" : c === "regular" ? "neutro" : "apagado"} icono={c === "buena" ? "check" : c === "sinProbar" ? undefined : c === "mala" ? "alerta" : "info"}>{t.nombres[c]}</Estado>
             </div>
             {med && <p className="t-data text-muted">{t.datos(med.ping, med.jitter, med.fallos)}</p>}
+            {(med?.ruta === "TCP" || med?.ruta === "TLS") && <Aviso titulo={t.avisoTcp[0]}>{t.avisoTcp[1]}</Aviso>}
             {c === "mala" && <Aviso titulo={t.avisoMala[0]}>{t.avisoMala[1]}</Aviso>}
             {c === "regular" && <Aviso tono="neutro">{t.avisoRegular}</Aviso>}
             {c === "sinProbar" && <Aviso tono="neutro">{t.avisoSin}</Aviso>}

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Icono } from "@/components/icono";
 import { ErrorAccion, Pagina, PedirCuenta } from "@/components/marco";
 import { Carga } from "@/components/pagina-admin";
@@ -10,6 +10,10 @@ import { createRecharge, type Recharge, type RechargeStatus, type SiteConfig } f
 import { fecha, soles } from "@/lib/config";
 import { useAccion, useDatos } from "@/lib/datos";
 import { useVista } from "@/lib/vista";
+
+// El número de operación de Yape: 6 dígitos. Se quitan letras y espacios mientras se escribe o se pega.
+const DIGITOS_OP = 6;
+const soloDigitos = (v: string) => v.replace(/\D/g, "").slice(0, DIGITOS_OP);
 
 const t = T.recargar;
 const MONTOS = [15, 30, 45, 60];
@@ -28,14 +32,14 @@ function Copiar({ texto }: { texto: string }) {
 
 function Formulario({ config, previa, alEnviar }: { config: SiteConfig; previa: Recharge | null; alEnviar: (r: Recharge) => void }) {
   const [monto, setMonto] = useState(String(previa?.amount ?? 15));
-  const [op, setOp] = useState(previa?.operation ?? "");
+  const [op, setOp] = useState(soloDigitos(previa?.operation ?? ""));
   const [enviado, setEnviado] = useState(false);
   // La misma clave en los reintentos: si la respuesta se pierde, el backend no crea dos recargas.
   const [clave] = useState(() => crypto.randomUUID());
   const { ocupado, error, ejecutar } = useAccion();
   const n = Number(monto);
   const montoOk = /^\d{1,4}$/.test(monto) && n >= 1;
-  const opOk = /^\d{4,20}$/.test(op.trim());
+  const opOk = new RegExp(`^\\d{${DIGITOS_OP}}$`).test(op);
   return (
     <form noValidate className="flex flex-col gap-10" onSubmit={(e) => {
       e.preventDefault();
@@ -66,7 +70,7 @@ function Formulario({ config, previa, alEnviar }: { config: SiteConfig; previa: 
       </section>
 
       <div className="flex flex-col gap-4">
-        <Campo id="op" inputMode="numeric" autoComplete="off" etiqueta={t.operacion} value={op} onChange={(e) => setOp(e.target.value)} ayuda={t.ayuda} error={enviado && !opOk ? t.errorOp : undefined} />
+        <Campo id="op" inputMode="numeric" pattern="[0-9]*" autoComplete="off" etiqueta={t.operacion} value={op} onChange={(e) => setOp(soloDigitos(e.target.value))} ayuda={t.ayuda} error={enviado && !opOk ? t.errorOp : undefined} />
         <Boton type="submit" disabled={ocupado}>{t.enviar}</Boton>
         <ErrorAccion>{error}</ErrorAccion>
         <p className="text-muted">{t.nota}</p>
@@ -119,10 +123,8 @@ function Recargas({ lista, recargar, config }: { lista: Recharge[]; recargar: ()
 }
 
 function Contenido() {
-  const { yo, saldo, conCuenta, usuario, sitio } = useVista();
+  const { saldo, conCuenta, usuario, sitio } = useVista();
   const { datos, error, recargar } = useDatos<{ recharges: Recharge[] }>(conCuenta ? "/api/recharges" : null);
-  // Cuando el admin resuelve una recarga cambia la sesión: volvemos a pedir la lista.
-  useEffect(() => recargar(), [yo, recargar]);
   if (usuario === "bloqueado") return <div className="mx-auto max-w-md py-12"><h1 className="sr-only">{t.titulo}</h1><Accion /></div>;
   const config = sitio.datos?.config;
   return (

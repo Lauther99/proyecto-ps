@@ -39,7 +39,7 @@ export function useVista() {
   // Con el admin jugando (sin límite) o la cola en pausa no se puede estimar la espera.
   const sinLimite = !!sala?.current && sala.current.endsAt === null;
   const detenida = consola === "apagada" || consola === "mantenimiento" || !!sala?.paused;
-  const restanteMs = sala?.current?.endsAt ? Math.max(0, sala.current.endsAt - ahora) : 0;
+  const restanteMs = sala?.current?.endsAt ? Math.max(0, sala.current.endsAt - (sala.outage?.since ?? ahora)) : 0;
   const base = sala?.current ? Math.ceil(restanteMs / 60_000) : (sala?.offer?.minutes ?? 0);
   const cola = lista.map((p, i) => ({ ...p, yo: p.userId === yo?.id, en: lista.slice(0, i).reduce((t, x) => t + x.minutes, base) }));
 
@@ -49,6 +49,7 @@ export function useVista() {
     salaUrl: `/sala?id=${encodeURIComponent(info.id)}`,
     esperaNueva: lista.reduce((t, p) => t + p.minutes, base),
     miPuesto: cola.findIndex((p) => p.yo),
+    fallaMs: sala?.outage ? Math.max(0, sala.outage.until - ahora) : null,
     ofertaMs: ofrecido && sala?.offer ? Math.max(0, sala.offer.expiresAt - ahora) : 0,
     ofertaMinutos: sala?.offer?.minutes ?? precio.blockMinutes,
     conCuenta: !!yo,
