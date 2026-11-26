@@ -34,3 +34,26 @@ export async function getIceServers(env: Env, ttlSeconds: number): Promise<RTCIc
   if (!data.iceServers) return STUN_ONLY
   return Array.isArray(data.iceServers) ? data.iceServers : [data.iceServers]
 }
+
+// Usuarios TURN de una respuesta (para poder anularlos después).
+export const turnUsernames = (servers: RTCIceServerLike[]): string[] =>
+  servers.flatMap((s) => (typeof s.username === 'string' && s.username ? [s.username] : []))
+
+// Anula credenciales antes de que venzan: así no sirven después del turno. Cloudflare responde 204.
+export async function revokeCredentials(env: Env, usernames: string[]): Promise<void> {
+  if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN || !usernames.length) return
+  await Promise.all(
+    usernames.map(async (username) => {
+      try {
+        const response = await fetch(
+          `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/${encodeURIComponent(username)}/revoke`,
+          { method: 'POST', headers: { Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}` }, signal: AbortSignal.timeout(5000) },
+        )
+        // 404: ya no existe (venció); no es un problema.
+        if (!response.ok && response.status !== 404) console.error('TURN: no se pudo anular una credencial', response.status)
+      } catch (e) {
+        console.error('TURN: sin respuesta al anular', e)
+      }
+    }),
+  )
+}

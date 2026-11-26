@@ -111,17 +111,18 @@ async function main() {
   check('callback sin la cookie del navegador se rechaza', cb.headers.get('location').includes('login_error=expirado'))
 
   // --- configuración y recargas ---
-  check('sin Yape configurado no hay recargas', (await call(ana, '/api/recharges', { amount: 20, operation: '00123456', key: 'k0' })).status === 409)
+  check('sin Yape configurado no hay recargas', (await call(ana, '/api/recharges', { amount: 20, operation: '001234', key: 'k0' })).status === 409)
   const config = { blockMinutes: 30, blockCredits: 15, maxMinutes: 120, acceptSeconds: 15, yapeHolder: 'Prueba', yapeNumber: '900000000', youtubeChannelId: null }
   check('admin guarda la configuración', (await call(admin, '/api/admin/config', config)).status === 204)
   check('configuración imposible se rechaza', (await call(admin, '/api/admin/config', { ...config, maxMinutes: 100 })).status === 400)
   const site = (await call(null, '/api/site')).data
   check('/api/site es público y trae sala y precio', site.rooms[0]?.id === 'main' && site.config.acceptSeconds === 15)
-  const r1 = await call(ana, '/api/recharges', { amount: 40, operation: '00123456', key: 'k1' })
-  check('recarga creada, conserva los ceros', r1.status === 200 && r1.data.recharge.operation === '00123456')
-  check('reintento con la misma clave no duplica', (await call(ana, '/api/recharges', { amount: 40, operation: '00123456', key: 'k1' })).data.recharge.id === r1.data.recharge.id)
-  check('misma operación pendiente se rechaza', (await call(ana, '/api/recharges', { amount: 40, operation: '00123456', key: 'k2' })).status === 409)
-  const r2 = await call(beto, '/api/recharges', { amount: 20, operation: '00123456', key: 'k3' })
+  const r1 = await call(ana, '/api/recharges', { amount: 40, operation: '001234', key: 'k1' })
+  check('el número de operación debe tener 6 dígitos', (await call(ana, '/api/recharges', { amount: 40, operation: '1234567', key: 'k9' })).status === 400)
+  check('recarga creada, conserva los ceros', r1.status === 200 && r1.data.recharge.operation === '001234')
+  check('reintento con la misma clave no duplica', (await call(ana, '/api/recharges', { amount: 40, operation: '001234', key: 'k1' })).data.recharge.id === r1.data.recharge.id)
+  check('misma operación pendiente se rechaza', (await call(ana, '/api/recharges', { amount: 40, operation: '001234', key: 'k2' })).status === 409)
+  const r2 = await call(beto, '/api/recharges', { amount: 20, operation: '001234', key: 'k3' })
   const list = (await call(admin, '/api/admin/recharges?status=pending')).data.recharges
   check('admin ve la operación repetida', list.length === 2 && list.every((r) => r.repeated))
   const both = await Promise.all([1, 2, 3].map(() => call(admin, `/api/admin/recharges/${r1.data.recharge.id}`, { status: 'approved' })))
@@ -153,6 +154,8 @@ async function main() {
   const offer = await visitor.until((s) => s.offer)
   check('la sala publica apodo, nunca correo ni nombre', offer.offer.name === 'Ana_Ñ' && !JSON.stringify(offer).includes('@') && !JSON.stringify(offer).includes('Real'))
   check('quien no juega no recibe TURN', (await call(ana, '/api/turn')).status === 403 && (await call(beto, '/api/turn')).status === 403)
+  check('la prueba de conexión exige sesión', (await fetch(`${API}/api/turn/test`)).status === 401 && (await call(beto, '/api/turn/test')).status === 200)
+  check('la prueba de velocidad exige sesión', (await fetch(`${API}/api/speed`)).status === 401)
   check('beto entra detrás', (await call(beto, '/api/queue/join', { minutes: 60 })).status === 204)
   check('beto no puede aceptar el turno de ana', (await call(beto, '/api/turn/accept', {})).status === 409)
   const accepts = await Promise.all([1, 2].map(() => call(ana, '/api/turn/accept', {})))
@@ -168,6 +171,12 @@ async function main() {
   agent.send({ type: 'signal', data: { type: 'offer', sdp: 'x' } })
   check('la oferta llega al jugador y a nadie más', (await wsAna.wait((m) => m.type === 'signal')).data.sdp === 'x' && !visitor.inbox.length)
 
+  agent.send({ type: 'viewer', userId: ana.id, connected: true })
+  wsAna.send({ type: 'quality', rtt: 40, loss: 0, jitter: 3 })
+  wsAna.send({ type: 'quality', rtt: 41, loss: 0, jitter: 3 })
+  visitor.send({ type: 'quality', rtt: 1, loss: 0, jitter: 0 })
+  agent.send({ type: 'viewer', userId: beto.id, connected: false })
+
   // --- fallas ---
   const before = (await visitor.until((s) => s.current)).current.endsAt
   agent.send({ type: 'status', ps4: false })
@@ -176,6 +185,8 @@ async function main() {
   await sleep(300)
   check('cerrar la pestaña (ps4:false sin falla) no regala tiempo', visitor.last.current.endsAt === before)
   agent.send({ type: 'status', ps4: false, fault: true })
+  const out = await visitor.until((s) => s.outage)
+  check('la sala avisa de la falla con su límite de 90 s', out.outage.until - out.outage.since === 90_000)
   await sleep(1200)
   agent.send({ type: 'status', ps4: true, fault: false })
   const extra = (await visitor.until((s) => s.current.endsAt > before)).current.endsAt - before
@@ -201,9 +212,20 @@ async function main() {
   check('terminar antes no devuelve', (await call(ana, '/api/turn/end', {})).status === 204 && (await balance(ana)).available === 30)
   const ses = (await call(ana, '/api/sessions')).data.sessions
   check('la sesión queda en el historial', ses.length === 1 && ses[0].game === 'Juego A' && ses[0].result === 'left' && ses[0].refundedCredits === 5, ses)
+  check('jugador no ve el registro', (await call(ana, `/api/admin/sessions/${ses[0].id}/events`)).status === 403)
+  const rep = (await call(admin, `/api/admin/sessions/${ses[0].id}/events`)).data
+  const kinds = rep.events.map((e) => e.kind)
+  check('el registro anota la partida', ['start', 'video_on', 'quality', 'console_fault', 'recovered', 'agent_off', 'agent_on', 'held', 'refund', 'end'].every((k) => kinds.includes(k)) && kinds.filter((k) => k === 'quality').length === 1 && !kinds.includes('video_off'), kinds)
+  check('veredicto: falla nuestra', rep.report.verdict === 'ours', rep.report)
+  const refund = (credits, key) => call(admin, `/api/admin/sessions/${ses[0].id}/refund`, { credits, reason: 'reclamo', key })
+  check('devolver más de lo cobrado se rechaza', (await refund(11, 'a')).status === 409 && (await balance(ana)).available === 30)
+  const same = await Promise.all([1, 2].map(() => refund(2, 'b')))
+  check('devolución manual con doble clic suma una vez', same.filter((r) => r.status === 204).length === 1 && (await balance(ana)).available === 32)
+  check('el admin ve cuántas devoluciones manuales tuvo', (await call(admin, '/api/admin/users')).data.users.find((u) => u.id === ana.id).manualRefunds === 2)
+  await call(admin, `/api/admin/users/${ana.id}/balance`, { delta: -2, reason: 'fin de la prueba' })
   check('calificar la sesión propia', (await call(ana, `/api/sessions/${ses[0].id}/rating`, { score: 4, problems: [] })).status === 204 && (await call(beto, `/api/sessions/${ses[0].id}/rating`, { score: 1, problems: [] })).status === 404)
   const mov = (await call(ana, '/api/movements')).data.movements
-  check('los movimientos cuadran con el saldo', mov.reduce((t, m) => t + m.credits, 0) === 30 && mov.length === 3, mov)
+  check('los movimientos cuadran con el saldo', mov.reduce((t, m) => t + m.credits, 0) === 30 && mov.length === 5, mov)
 
   // --- oferta vencida (15 s) ---
   await visitor.until((s) => s.offer?.userId === beto.id)

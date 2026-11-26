@@ -4,8 +4,9 @@
 // copia, y es el único que cambia 'bookings' y 'rooms'.
 //
 // Sala -> navegador:  {type:"state", state}  {type:"me"}  {type:"signal", data}
-// Navegador -> sala:  {type:"signal", data}  (solo quien juega)
+// Navegador -> sala:  {type:"signal", data}  {type:"quality", rtt, loss, jitter, route}  (solo quien juega)
 // Agente -> sala:     {type:"signal", data}  {type:"status", ps4, fault?}
+//                     {type:"viewer", userId, connected}   el video del jugador conectó o se cortó
 //    fault: la sesión con la consola falló mientras alguien la necesitaba. ps4:false solo no es falla: el
 //    agente también lo manda cuando el jugador cierra su pestaña.
 // Sala -> agente:     {type:"player", player, iceServers}  {type:"youtube", on}  {type:"signal", data}
@@ -13,15 +14,19 @@
 
 import { DurableObject } from 'cloudflare:workers'
 import type { Env } from './env'
+import type { EventKind } from './events'
 import * as logic from './room-logic'
 import type { Change, State } from './room-logic'
-import { ACTIVE_BOOKINGS, finalStatus, joinQueries, toQueries, type Query } from './store'
-import { getIceServers } from './turn'
+import { ACTIVE_BOOKINGS, eventQuery, finalStatus, joinQueries, toQueries, type Query } from './store'
+import { getIceServers, revokeCredentials, turnUsernames, type RTCIceServerLike } from './turn'
 
 const MAX_MESSAGE_BYTES = 64 * 1024 // una SDP ocupa unos pocos KB
 const MAX_BROWSERS = 500
 const CONTROL_TTL_S = 4 * 60 * 60
 const TTL_MARGIN_S = 15 * 60
+const QUALITY_EVERY_MS = 20_000
+const ROUTES = ['directa', 'relé UDP', 'relé TCP', 'relé TLS', 'relé']
+const MAX_TURN_ISSUED = 100 // más allá de esto, las más viejas solo vencen solas
 
 type Attachment =
   | { kind: 'browser'; userId: string; sid: string } // userId vacío = visitante; sid: id de esta pestaña
@@ -35,6 +40,8 @@ export class Room extends DurableObject<Env> {
   private ps4Connected = false
   private playerSid: string | null = null // pestaña del jugador que negocia con el agente
   private agentPlayer: string | null = null // último jugador avisado al agente
+  private lastQuality = 0
+  private turnIssued: string[] = [] // usuarios TURN dados al jugador actual y al agente para él
   private tail: Promise<unknown> = Promise.resolve()
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -45,6 +52,7 @@ export class Room extends DurableObject<Env> {
       this.ps4Connected = (await ctx.storage.get<boolean>('ps4Connected')) ?? false
       this.playerSid = (await ctx.storage.get<string>('playerSid')) ?? null
       this.agentPlayer = (await ctx.storage.get<string>('agentPlayer')) ?? null
+      this.turnIssued = (await ctx.storage.get<string[]>('turnIssued')) ?? []
     })
   }
 
@@ -120,7 +128,11 @@ export class Room extends DurableObject<Env> {
     const key = player ? `${player.userId}:${player.isAdmin}` : ''
     if (key !== this.agentPlayer) {
       this.agentPlayer = key
-      await this.ctx.storage.put('agentPlayer', key)
+      // Cambió quien juega: las credenciales TURN del anterior dejan de servir (sin esperar a Cloudflare).
+      const old = this.turnIssued
+      this.turnIssued = []
+      await this.ctx.storage.put({ agentPlayer: key, turnIssued: [] })
+      if (old.length) this.ctx.waitUntil(revokeCredentials(this.env, old))
       this.sendToAgent(await this.playerMessage(state))
     }
     this.broadcast(state)
@@ -235,11 +247,11 @@ export class Room extends DurableObject<Env> {
     this.notifyNow(userId)
   }
 
-  // Segundos de vida para las credenciales TURN de quien juega; null si no le toca.
-  turnTtl(userId: string): Promise<number | null> {
+  // Credenciales TURN para quien juega (null si no le toca). Se anotan para anularlas al terminar el turno.
+  turnCredentials(userId: string): Promise<RTCIceServerLike[] | null> {
     return this.enqueue(async () => {
       const state = await this.load()
-      return this.player(state)?.userId === userId ? this.ttl(state) : null
+      return this.player(state)?.userId === userId ? this.issueIceServers(state) : null
     })
   }
 
@@ -266,7 +278,7 @@ export class Room extends DurableObject<Env> {
         this.send(server, { type: 'youtube', on: state.youtube })
         // Volvió el agente: si alguien jugaba, sigue con el tiempo perdido a su favor.
         const now = Date.now()
-        await this.commit(playerInOutage(state) ? logic.outageEnd(state, now) : logic.tick(state, now))
+        await this.commit(playerInOutage(state) ? logic.outageEnd(state, now) : logic.tick(state, now), this.note(state, 'agent_on', now))
       })
       const headers = request.headers.get('X-Agent-Subprotocol') ? { 'Sec-WebSocket-Protocol': 'ps4-agent' } : undefined
       return new Response(null, { status: 101, webSocket: client, headers })
@@ -284,7 +296,7 @@ export class Room extends DurableObject<Env> {
     if (typeof message !== 'string' || message.length > MAX_MESSAGE_BYTES) return
     const who = ws.deserializeAttachment() as Attachment | null
     if (!who || (who.kind === 'browser' && !who.userId)) return // los visitantes solo miran
-    let msg: { type?: string; data?: unknown; ps4?: unknown; fault?: unknown } | null
+    let msg: Message | null
     try {
       msg = JSON.parse(message)
     } catch {
@@ -296,6 +308,7 @@ export class Room extends DurableObject<Env> {
       try {
         if (who.kind === 'agent') await this.onAgentMessage(body)
         else if (body.type === 'signal') await this.onBrowserSignal(who, body.data)
+        else if (body.type === 'quality') await this.onQuality(who, body)
       } catch (e) {
         console.error('Room: mensaje', e)
       }
@@ -311,7 +324,8 @@ export class Room extends DurableObject<Env> {
       this.ps4Connected = false
       await this.ctx.storage.put({ ps4Connected: false, agentLastSeen: Date.now() })
       const state = await this.load()
-      await this.commit(logic.outageStart({ ...state, agentOnline: false }, Date.now()))
+      const now = Date.now()
+      await this.commit(logic.outageStart({ ...state, agentOnline: false }, now), this.note(state, 'agent_off', now))
     })
   }
 
@@ -326,7 +340,7 @@ export class Room extends DurableObject<Env> {
       const now = Date.now()
       // Tras un despliegue no llega el cierre del agente: si alguien juega sin agente, es una falla.
       const lost = state.agentOnline ? [] : logic.outageStart(state, now)
-      if (lost.length) await this.commit(lost)
+      if (lost.length) await this.commit(lost, this.note(state, 'agent_off', now))
       await this.commit(logic.tick(await this.load(), now))
     })
   }
@@ -345,7 +359,27 @@ export class Room extends DurableObject<Env> {
     this.sendToAgent({ type: 'signal', data })
   }
 
-  private async onAgentMessage(msg: { type?: string; data?: unknown; ps4?: unknown; fault?: unknown }) {
+  // Anota algo en la partida en curso (nada si nadie juega un turno).
+  private note(state: State, kind: EventKind, now: number, detail: Record<string, unknown> | null = null): Query[] {
+    const p = logic.playing(state)
+    return p ? [eventQuery(p.id, kind, now, detail)] : []
+  }
+
+  // Lo mide el navegador del jugador: se guarda como pista, con valores acotados.
+  private async onQuality(who: { userId: string; sid: string }, msg: Message) {
+    const state = await this.load()
+    const now = Date.now()
+    if (logic.playing(state)?.userId !== who.userId || who.sid !== this.playerSid || now - this.lastQuality < QUALITY_EVERY_MS) return
+    const clean = (v: unknown, max: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(0, Math.round(v * 10) / 10)) : null)
+    const rtt = clean(msg.rtt, 10_000)
+    const loss = clean(msg.loss, 100)
+    if (rtt === null || loss === null) return
+    this.lastQuality = now
+    const route = typeof msg.route === 'string' && ROUTES.includes(msg.route) ? msg.route : null
+    await this.batch(this.note(state, 'quality', now, { rtt, loss, jitter: clean(msg.jitter, 10_000), route }))
+  }
+
+  private async onAgentMessage(msg: Message) {
     if (msg.type === 'signal') {
       const player = this.player(await this.load())
       if (!player) return
@@ -353,6 +387,10 @@ export class Room extends DurableObject<Env> {
         const who = ws.deserializeAttachment() as Attachment | null
         if (who?.kind === 'browser' && who.sid === this.playerSid) this.send(ws, { type: 'signal', data: msg.data })
       }
+    } else if (msg.type === 'viewer') {
+      const state = await this.load()
+      if (logic.playing(state)?.userId !== msg.userId) return
+      await this.batch(this.note(state, msg.connected === true ? 'video_on' : 'video_off', Date.now()))
     } else if (msg.type === 'status') {
       this.ps4Connected = msg.ps4 === true
       await this.ctx.storage.put('ps4Connected', this.ps4Connected)
@@ -360,7 +398,10 @@ export class Room extends DurableObject<Env> {
       const now = Date.now()
       // fault:false sin consola: el jugador se fue durante la falla, así que su tiempo vuelve a correr.
       if ((this.ps4Connected || msg.fault === false) && playerInOutage(state)) await this.commit(logic.outageEnd(state, now))
-      else if (msg.fault === true) await this.commit(logic.outageStart(state, now))
+      else if (msg.fault === true) {
+        const changes = logic.outageStart(state, now)
+        await this.commit(changes, changes.length ? this.note(state, 'console_fault', now) : [])
+      }
       else await this.after()
     }
   }
@@ -381,7 +422,17 @@ export class Room extends DurableObject<Env> {
   // Incluye los servidores ICE (TURN), así el agente no necesita pedirlos por HTTP.
   private async playerMessage(state: State) {
     const player = this.player(state)
-    return { type: 'player', player, iceServers: player ? await getIceServers(this.env, this.ttl(state)) : [] }
+    return { type: 'player', player, iceServers: player ? await this.issueIceServers(state) : [] }
+  }
+
+  private async issueIceServers(state: State): Promise<RTCIceServerLike[]> {
+    const servers = await getIceServers(this.env, this.ttl(state))
+    const names = turnUsernames(servers)
+    if (names.length) {
+      this.turnIssued = [...this.turnIssued, ...names].slice(-MAX_TURN_ISSUED)
+      await this.ctx.storage.put('turnIssued', this.turnIssued)
+    }
+    return servers
   }
 
   // Lo que ve cualquiera: apodos, nunca correos.
@@ -401,6 +452,8 @@ export class Room extends DurableObject<Env> {
       youtube: state.youtube,
       agentOnline: state.agentOnline,
       ps4Connected: this.ps4Connected,
+      // Falla nuestra en curso: el reloj del turno está detenido hasta 'until'; después se devuelve.
+      outage: p && p.outageAt !== null && !state.control ? { since: p.outageAt, until: p.outageAt + logic.OUTAGE_GRACE_MS } : null,
       now: Date.now(), // para que el navegador corrija la diferencia de reloj
     }
   }
@@ -426,6 +479,8 @@ export class Room extends DurableObject<Env> {
     }
   }
 }
+
+type Message = { type?: string; data?: unknown; ps4?: unknown; fault?: unknown; userId?: unknown; connected?: unknown; rtt?: unknown; loss?: unknown; jitter?: unknown; route?: unknown }
 
 export type AdminAction =
   | { action: 'take' | 'release' | 'pause' | 'resume' }

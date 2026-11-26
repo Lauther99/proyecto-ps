@@ -10,8 +10,8 @@
 //   navegador -> agente: {"type":"answer","sdp":"..."}
 //
 // Controles: canal de datos WebRTC "input" (sin orden ni reenvíos: si un paquete se pierde,
-// el siguiente ya trae el estado completo). El navegador manda el estado del mando ~30 veces
-// por segundo:
+// el siguiente ya trae el estado completo). El navegador manda el estado del mando en
+// cuanto cambia (lo lee a 125 Hz), lo repite 2 veces y, sin cambios, sigue cada 33 ms:
 //   {"s":seq,"b":botones,"l2":0-255,"r2":0-255,"lx":..,"ly":..,"rx":..,"ry":..}
 // Solo controla el primer navegador conectado (el "jugador"); los demás solo miran.
 //
@@ -392,8 +392,25 @@ namespace agent
                 request_keyframe(state);
             });
 
-            viewer->pc->onStateChange([](rtc::PeerConnection::State s) {
+            // Para el registro de partidas: la sala anota cuando el video del jugador conecta o se corta.
+            // (Quien llama con from_room ya tiene room_mutex, por eso se lee room_ws sin bloquear.)
+            std::weak_ptr<rtc::WebSocket> room_ws;
+            std::string player_id;
+            if (from_room)
+            {
+                room_ws = state.room_ws;
+                player_id = state.room_player.value("userId", "");
+            }
+            auto was_connected = std::make_shared<std::atomic<bool>>(false);
+            viewer->pc->onStateChange([room_ws, player_id, was_connected](rtc::PeerConnection::State s) {
                 std::printf("[web] Estado WebRTC: %d\n", static_cast<int>(s));
+                const bool connected = s == rtc::PeerConnection::State::Connected;
+                const bool lost = s == rtc::PeerConnection::State::Disconnected ||
+                                  s == rtc::PeerConnection::State::Failed || s == rtc::PeerConnection::State::Closed;
+                if (player_id.empty() || (!connected && !lost) || was_connected->exchange(connected) == connected)
+                    return;
+                if (auto w = room_ws.lock(); w && w->isOpen())
+                    w->send(json{{"type", "viewer"}, {"userId", player_id}, {"connected", connected}}.dump());
             });
 
             // Sin trickle ICE: cuando terminamos de reunir candidatos, enviamos la oferta completa.

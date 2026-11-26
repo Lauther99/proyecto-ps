@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { beforeEach, expect, it } from 'vitest'
 import * as L from '../src/room-logic'
-import { ACTIVE_BOOKINGS, approveQueries, finalStatus, joinQueries, toQueries } from '../src/store'
+import { ACTIVE_BOOKINGS, approveQueries, finalStatus, joinQueries, manualRefundQueries, toQueries } from '../src/store'
 
 const read = (f) => fs.readFileSync(new URL(`../migrations/${f}`, import.meta.url), 'utf8')
 const MIN = 60_000
@@ -60,6 +60,7 @@ beforeEach(() => {
     db.exec(`INSERT INTO users (id, email, name, status, created_at) VALUES ('${u}', '${u}@x.test', 'Nombre Real', '${s}', 1)`)
   db.exec(read('0002_credits.sql'))
   db.exec(read('0003_session_game.sql'))
+  db.exec(read('0004_session_events.sql'))
 })
 
 it('la migración aprueba pendientes, conserva bloqueados y oculta el nombre', () => {
@@ -98,6 +99,22 @@ it('recorrido completo: reserva, cobro, fin y siguiente', () => {
   commit(L.tick(load(), now + 60_000))
   expect(wallet('beto')).toEqual({ available: 20, reserved: 0 })
   expect(JSON.parse(db.prepare("SELECT notice FROM users WHERE id = 'beto'").get().notice)).toEqual({ kind: 'expired' })
+})
+
+it('devolución manual: una vez por clave, solo partidas terminadas y sin pasar de lo cobrado', () => {
+  money('ana', 15)
+  join('ana')
+  commit(L.accept(load(), 'ana', now))
+  const id = load().bookings[0].id
+  const refund = (key, credits) => batch(manualRefundQueries({ bookingId: id, key, credits, adminId: 'root', reason: 'x', now }))
+  expect(refund('a', 5)[0]).toBe(0)
+  commit(L.end(load(), 'ana', now + MIN))
+  refund('b', 10)
+  expect(() => refund('b', 1)).toThrow('UNIQUE')
+  expect(() => refund('c', 6)).toThrow('CHECK')
+  refund('d', 5)
+  expect(wallet('ana')).toEqual({ available: 15, reserved: 0 })
+  expect(db.prepare('SELECT kind FROM session_events ORDER BY id').all().map((e) => e.kind)).toEqual(['start', 'end', 'refund', 'refund'])
 })
 
 it('el historial conserva el juego de cuando se jugó', () => {

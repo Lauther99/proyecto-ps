@@ -1,10 +1,11 @@
 // Rutas /api/admin/*. Todas exigen rol admin; las que cambian algo dejan registro en 'audit'.
 
 import type { Env, User } from './env'
+import { analyze, type EventKind, type SessionEvent } from './events'
 import { HttpError, done, integer, json, readBody, requireUser, text } from './http'
 import { SESSIONS, fromRoom, getGames, roomStub } from './player'
 import type { AdminAction } from './room'
-import { approveQueries } from './store'
+import { approveQueries, manualRefundQueries } from './store'
 
 const LIMA_OFFSET_MS = 5 * 3_600_000 // UTC-5 todo el año
 const DAY_MS = 86_400_000
@@ -29,6 +30,7 @@ export async function adminRoutes(request: Request, env: Env, path: string): Pro
   const admin = await requireUser(request, env, { admin: true })
   const [section, id, sub] = path.slice('/api/admin/'.length).split('/')
   if (request.method === 'GET' && !id) return read(env, section ?? '', new URL(request.url).searchParams)
+  if (request.method === 'GET' && section === 'sessions' && id && sub === 'events') return sessionReport(env, id)
   if (request.method !== 'POST') return null
   const body = await readBody(request)
 
@@ -36,6 +38,7 @@ export async function adminRoutes(request: Request, env: Env, path: string): Pro
   if (section === 'config' && !id) return saveConfig(env, admin, body)
   if (!id) return null
   if (section === 'rooms' && !sub) return saveRoom(env, admin, id, body)
+  if (section === 'sessions' && sub === 'refund') return refundSession(env, admin, id, body)
   if (section === 'recharges' && !sub) return resolveRecharge(env, admin, id, body)
   if (section === 'games' && !sub) {
     const status = text(body, 'status', 20, 'Estado inválido')
@@ -67,7 +70,8 @@ async function read(env: Env, section: string, params: URLSearchParams): Promise
     }
     case 'users': {
       const { results } = await env.DB.prepare(
-        `SELECT u.id, u.email, u.nickname, u.status, u.role, COALESCE(w.available, 0) AS available
+        `SELECT u.id, u.email, u.nickname, u.status, u.role, COALESCE(w.available, 0) AS available,
+                (SELECT COUNT(*) FROM ledger l WHERE l.user_id = u.id AND l.kind = 'refund' AND l.actor_id IS NOT NULL) AS manualRefunds
            FROM users u LEFT JOIN wallets w ON w.user_id = u.id ORDER BY u.created_at DESC LIMIT 1000`,
       ).all()
       return json({ users: results })
@@ -197,6 +201,31 @@ async function saveConfig(env: Env, admin: User, body: Record<string, unknown>):
     audit(env, admin, 'config', 'settings', JSON.stringify({ blockMinutes, blockCredits, maxMinutes, acceptSeconds })),
   ])
   await roomStub(env).refresh()
+  return done()
+}
+
+async function sessionReport(env: Env, id: string): Promise<Response> {
+  const b = await env.DB.prepare('SELECT ended_at FROM bookings WHERE id = ? AND started_at IS NOT NULL AND ended_at IS NOT NULL').bind(id).first<{ ended_at: number }>()
+  if (!b) throw new HttpError(404, 'No existe esa partida.')
+  const { results } = await env.DB.prepare('SELECT at, kind, detail FROM session_events WHERE booking_id = ? ORDER BY at, id').bind(id).all<{ at: number; kind: EventKind; detail: string | null }>()
+  const events: SessionEvent[] = results.map((e) => ({ ...e, detail: e.detail ? (JSON.parse(e.detail) as Record<string, unknown>) : null }))
+  return json({ events, report: analyze(events, b.ended_at) })
+}
+
+async function refundSession(env: Env, admin: User, id: string, body: Record<string, unknown>): Promise<Response> {
+  const credits = integer(body, 'credits', 1, 10_000, 'Escribe los créditos a devolver.')
+  const reason = readReason(body)
+  const key = text(body, 'key', 64, 'Petición inválida')
+  const owner = await env.DB.prepare('SELECT user_id FROM bookings WHERE id = ?').bind(id).first<{ user_id: string }>()
+  try {
+    const [first] = await env.DB.batch(manualRefundQueries({ bookingId: id, key, credits, adminId: admin.id, reason, now: Date.now() }).map((q) => env.DB.prepare(q.sql).bind(...q.params)))
+    if (!first?.meta.changes) throw new HttpError(404, 'No existe esa partida.')
+  } catch (e) {
+    if (String(e).includes('CHECK constraint failed')) throw new HttpError(409, 'No puedes devolver más de lo cobrado en esa partida.')
+    if (String(e).includes('UNIQUE')) throw new HttpError(409, 'Esa devolución ya se hizo.')
+    throw e
+  }
+  if (owner) await notify(env, owner.user_id)
   return done()
 }
 

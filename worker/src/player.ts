@@ -5,6 +5,9 @@ import { HttpError, done, integer, json, limit, readBody, requireUser, text } fr
 import type { OpResult } from './room'
 import { getIceServers } from './turn'
 
+const TEST_TTL_S = 120
+const SPEED_CHUNK = 64 * 1024
+const SPEED_CHUNKS = 400 // 25 MB
 export const ROOM_ID = 'main' // una consola por ahora
 export const roomStub = (env: Env) => env.ROOM.get(env.ROOM.idFromName(ROOM_ID))
 
@@ -65,9 +68,32 @@ export async function playerRoutes(request: Request, env: Env, path: string): Pr
 
   if (get && path === '/api/turn') {
     const user = await requireUser(request, env)
-    const ttl = await roomStub(env).turnTtl(user.id)
-    if (ttl === null) throw new HttpError(403, 'No tienes el turno.')
-    return json({ iceServers: await getIceServers(env, ttl) })
+    // La sala las genera y las anota, para anularlas cuando termine el turno.
+    const iceServers = await roomStub(env).turnCredentials(user.id)
+    if (iceServers === null) throw new HttpError(403, 'No tienes el turno.')
+    return json({ iceServers })
+  }
+
+  // Prueba de conexión: credenciales de dos minutos, solo con sesión y con freno por usuario.
+  if (get && path === '/api/turn/test') {
+    const user = await requireUser(request, env)
+    await limit(env.LIMITER, `turn-test:${user.id}`)
+    return json({ iceServers: await getIceServers(env, TEST_TTL_S) })
+  }
+
+  // Prueba de velocidad: datos al azar (no se comprimen). El navegador corta a los pocos segundos.
+  if (get && path === '/api/speed') {
+    const user = await requireUser(request, env)
+    await limit(env.LIMITER, `speed:${user.id}`)
+    const chunk = crypto.getRandomValues(new Uint8Array(SPEED_CHUNK))
+    let left = SPEED_CHUNKS
+    const body = new ReadableStream({
+      pull(c) {
+        if (left-- > 0) c.enqueue(chunk.slice())
+        else c.close()
+      },
+    })
+    return new Response(body, { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store, no-transform' } })
   }
 
   if (post && path === '/api/me') {
@@ -164,7 +190,7 @@ async function createRecharge(request: Request, env: Env): Promise<Response> {
   const body = await readBody(request)
   const amount = integer(body, 'amount', 1, 500, 'El monto va de S/ 1 a S/ 500, sin céntimos.')
   const operation = text(body, 'operation', 20, 'Escribe el número de operación.')
-  if (!/^\d{4,20}$/.test(operation)) throw new HttpError(400, 'Escribe el número de operación, solo números.')
+  if (!/^\d{6}$/.test(operation)) throw new HttpError(400, 'Escribe los 6 dígitos del número de operación.')
   const key = text(body, 'key', 100, 'Petición inválida')
 
   const previous = await env.DB.prepare(RECHARGE).bind(user.id, key).first()

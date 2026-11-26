@@ -92,7 +92,7 @@ cobrado; `reorder` debe traer exactamente a los que están en la cola o responde
 
 | Punto | Cambio |
 |---|---|
-| **TURN** | `/api/turn` solo para quien tiene el turno o el control. Hoy basta estar aprobado y, con entrada automática, cualquiera gastaría tu relé. Duración: lo que resta del turno más 15 min |
+| **TURN** | `/api/turn` solo para quien tiene el turno o el control. Hoy basta estar aprobado y, con entrada automática, cualquiera gastaría tu relé. Duración: lo que resta del turno más 15 min. Al cambiar quien juega, la sala anula (revoke) las credenciales dadas al jugador anterior y al agente para él |
 | **Login con Google** | El `state` se ata al navegador con una cookie. Hoy no lo está: alguien podría hacer que otra persona entre, sin notarlo, en una cuenta ajena y recargue ahí |
 | **`next`** | Solo rutas internas: empieza con `/`, sin `//`, sin `\` y fuera de `/api` |
 | **Identidad** | Se busca primero por `google_sub` y luego por correo. `google_sub` y correo en conflicto: se rechaza |
@@ -150,3 +150,10 @@ recargas reales **no** se restaura la base, porque se perderían pagos: se corri
 4. Sala: cola, turnos, WebSocket público, TURN, admin de sala.
 5. Fallas y cambio del agente.
 6. Integración con `web/`, humo y prueba real.
+
+## 10. Registro de partidas (agregado después)
+
+`session_events` anota cada partida 90 días, sin IP. `src/events.ts` calcula el veredicto sugerido (función
+pura). El agente informa `{type:"viewer", userId, connected}`; el ping lo manda el navegador y es solo pista.
+Un corte del jugador nunca devuelve solo. El admin devuelve desde Sesiones, con motivo y sin pasar de lo
+cobrado: es la única escritura en `bookings` fuera de `Room`, y solo sobre partidas terminadas.

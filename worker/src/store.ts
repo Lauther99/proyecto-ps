@@ -1,6 +1,7 @@
 // Consultas SQL de la sala y del dinero, separadas de la red para poder probarlas con SQLite.
 // Cada movimiento del libro lleva su condición: un UPDATE que no cambia filas no cancela el batch.
 
+import { RETENTION_MS, type EventKind } from './events'
 import type { Booking, BookingSet, Change, LedgerEntry } from './room-logic'
 
 export type Query = { sql: string; params: (string | number | null)[] }
@@ -44,6 +45,26 @@ function insertLedger(e: LedgerEntry, status: string, now: number): Query {
   }
 }
 
+export const eventQuery = (bookingId: string, kind: EventKind, now: number, detail: Record<string, unknown> | null = null): Query => ({
+  sql: 'INSERT INTO session_events (booking_id, at, kind, detail) VALUES (?, ?, ?, ?)',
+  params: [bookingId, now, kind, detail && JSON.stringify(detail)],
+})
+
+// Lo que queda anotado de cada cambio.
+function eventsOf(c: Change, now: number): Query[] {
+  if (c.type === 'ledger') return c.entry.kind === 'refund' ? [eventQuery(c.entry.bookingId, 'refund', now, { credits: c.entry.available, manual: Boolean(c.entry.actorId) })] : []
+  if (c.type !== 'booking') return []
+  if (c.set.status === 'playing') return [eventQuery(c.id, 'start', now)]
+  if (c.from !== 'playing') return []
+  if (c.set.status === 'queued') return [eventQuery(c.id, 'held', now)]
+  if (c.set.status === 'done')
+    return [
+      eventQuery(c.id, 'end', now, { result: c.set.result ?? null }),
+      { sql: 'DELETE FROM session_events WHERE at < ?', params: [now - RETENTION_MS] },
+    ]
+  return c.set.outageAt === null && c.set.endsAt ? [eventQuery(c.id, 'recovered', now)] : []
+}
+
 // Convierte los cambios en consultas. 'checks' son los índices que deben modificar exactamente una fila.
 export function toQueries(changes: Change[], roomId: string, statusOf: (bookingId: string) => string, now: number): { queries: Query[]; checks: number[] } {
   const queries: Query[] = []
@@ -69,6 +90,7 @@ export function toQueries(changes: Change[], roomId: string, statusOf: (bookingI
       if (parts.length) queries.push({ sql: `UPDATE rooms SET ${parts.map(([k]) => `${k} = ?`).join(', ')} WHERE id = ?`, params: [...parts.map(([, v]) => v), roomId] })
     }
   }
+  for (const c of changes) queries.push(...eventsOf(c, now))
   return { queries, checks }
 }
 
@@ -93,6 +115,24 @@ export function joinQueries(b: { id: string; roomId: string; userId: string; pos
       params: [b.now, b.id],
     },
     { sql: 'UPDATE users SET notice = NULL WHERE id = ?', params: [b.userId] },
+  ]
+}
+
+// Devolución manual de una partida terminada. El CHECK de 'refunded' impide pasar de lo cobrado.
+export function manualRefundQueries(r: { bookingId: string; key: string; credits: number; adminId: string; reason: string; now: number }): Query[] {
+  const ended = "WHERE id = ? AND ended_at IS NOT NULL AND started_at IS NOT NULL AND charged = 1"
+  return [
+    { sql: `UPDATE bookings SET refunded = refunded + ? ${ended}`, params: [r.credits, r.bookingId] },
+    {
+      sql: `INSERT INTO ledger (op_key, user_id, kind, available_delta, booking_id, actor_id, detail, created_at)
+            SELECT ?, user_id, 'refund', ?, id, ?, ?, ? FROM bookings ${ended}`,
+      params: [`refund:${r.bookingId}:manual:${r.key}`, r.credits, r.adminId, `Devolución: ${r.reason}`, r.now, r.bookingId],
+    },
+    {
+      sql: `INSERT INTO session_events (booking_id, at, kind, detail) SELECT id, ?, 'refund', ? FROM bookings ${ended}`,
+      params: [r.now, JSON.stringify({ credits: r.credits, manual: true }), r.bookingId],
+    },
+    { sql: "INSERT INTO audit (admin_id, action, target, reason, created_at) VALUES (?, 'session.refund', ?, ?, ?)", params: [r.adminId, r.bookingId, `${r.credits}: ${r.reason}`, r.now] },
   ]
 }
 
